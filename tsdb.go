@@ -342,6 +342,15 @@ func (db *DB) applyRecord(rec walRecord) {
 	}
 }
 
+// Exists only for "waiting" to clear quque
+
+func (db *DB) DrainWAL() {
+	for len(db.walCh) > 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	db.flushWAL()
+}
+
 func hashSeries(metric string, labels map[string]string) seriesID {
 	keys := make([]string, 0, len(labels))
 	for k := range labels {
