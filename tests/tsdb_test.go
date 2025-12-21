@@ -219,7 +219,7 @@ func BenchmarkWriteThroughput(b *testing.B) {
 			})
 		}
 
-		err := db.Write("load", map[string]string{"sensor": "A1"}, points)
+		err := db.Write("load", map[string]string{"sensor": "A1"}, 123.00)
 		if err != nil {
 			b.Fatalf("Write error: %v", err)
 		}
@@ -236,4 +236,85 @@ func BenchmarkWriteThroughput(b *testing.B) {
 
 	b.Logf("pointsPerWrite=%d, totalOps=%d, totalPoints=%d, elapsed=%s",
 		pointsPerWrite, b.N, totalPoints, elapsed)
+}
+
+func BenchmarkWrite_BottleneckAnalysis(b *testing.B) {
+	db, err := tsdb.Open()
+	if err != nil {
+		b.Fatalf("Open error: %v", err)
+	}
+
+	b.Run("Sustained_Write_KeepOpen", func(b *testing.B) {
+		_ = newBenchDB(b)
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if err := db.Write("bench_metric", map[string]string{"h": "1"}, 52); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("Overhead_OpenClose_PerWrite", func(b *testing.B) {
+		dir := b.TempDir()
+		path := filepath.Join(dir, "tsdb_overhead.wal")
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			db, err := tsdb.Open(path)
+			if err != nil {
+				b.Fatalf("Open error: %v", err)
+			}
+
+			if err := db.Write("bench_metric", map[string]string{"h": "1"}, 52); err != nil {
+				b.Fatal(err)
+			}
+
+			if err := db.Close(); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func TestWriteDegradation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping degradation test in short mode")
+	}
+
+	db := newTestDB(t)
+
+	const batchSize = 100
+	const initialBatches = 10000000
+	const measureBatches = 100
+
+	startEmpty := time.Now()
+	for i := 0; i < measureBatches; i++ {
+		_ = db.Write("metric", nil, 1.0)
+	}
+	durationEmpty := time.Since(startEmpty)
+
+	t.Log("Generating load...")
+	for i := 0; i < initialBatches; i++ {
+		_ = db.Write("metric_load", map[string]string{"k": "v"}, 52)
+	}
+
+	t.Log("Waiting for WAL to drain...")
+	db.DrainWAL()
+
+	startFull := time.Now()
+	for i := 0; i < measureBatches; i++ {
+		_ = db.Write("metric", nil, 2.0)
+	}
+	durationFull := time.Since(startFull)
+
+	t.Logf("Duration (Empty DB): %v", durationEmpty)
+	t.Logf("Duration (Full DB):  %v", durationFull)
+
+	if durationFull > durationEmpty*2 {
+		t.Logf("WARNING: Write performance degraded significantly with data accumulation.")
+		t.Logf("Factor: %.2fx slower", float64(durationFull)/float64(durationEmpty))
+	} else {
+		t.Logf("Performance is stable regardless of data volume.")
+	}
 }

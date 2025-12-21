@@ -18,7 +18,7 @@ import (
 func main() {
 	start := time.Now()
 
-	sth, err := synthetis.Open("./data/mtx.wal")
+	sth, err := synthetis.Open("./data/mtx.bin")
 	if err != nil {
 		slog.Info("Error occured", "err", err)
 		return
@@ -42,7 +42,7 @@ func main() {
 			case <-ticker.C:
 				if err := sth.Write("each_millisecond_metric",
 					map[string]string{"user": "pooser"},
-					rand.Intn(34),
+					float64(rand.Intn(34)),
 				); err != nil {
 					slog.Info("Error occured", "err", err)
 					return
@@ -51,10 +51,10 @@ func main() {
 		}
 	}()
 
-	for i := 0; i < 10000; i++ {
+	for i := 0.0; i < 100000; i++ {
 		if err := sth.Write("some_mtx",
 			map[string]string{"host": "a"},
-			i, 52, rand.Intn(52),
+			i, 52, float64(rand.Intn(52)),
 		); err != nil {
 			slog.Info("Error occured", "err", err)
 			close(done)

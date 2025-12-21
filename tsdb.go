@@ -2,10 +2,12 @@ package synthetis
 
 import (
 	"bufio"
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,11 +15,11 @@ import (
 	"time"
 )
 
-const Version = "1.1.0-alpha"
+const Version = "1.3.0-alpha"
 
 type Point struct {
-	Timestamp int64       `json:"timestamp"`
-	Value     interface{} `json:"value"`
+	Timestamp int64   `json:"timestamp"`
+	Value     float64 `json:"value"`
 }
 
 type WriteSeries struct {
@@ -32,19 +34,18 @@ type SeriesResult struct {
 	Points []Point           `json:"points"`
 }
 
-type QueryOptions struct {
-	Metric string
-	Labels map[string]string
-	From   int64
-	To     int64
-}
-
 type seriesID uint64
 
 type series struct {
 	metric string
 	labels map[string]string
 	points []Point
+}
+
+type walRecord struct {
+	Metric string
+	Labels map[string]string
+	Points []Point
 }
 
 const numShards = 128
@@ -66,17 +67,7 @@ type DB struct {
 	walDone chan struct{}
 }
 
-type walRecord struct {
-	Type   string            `json:"type"`
-	Metric string            `json:"metric"`
-	Labels map[string]string `json:"labels"`
-	Points []Point           `json:"points"`
-}
-
 func Open(path ...string) (*DB, error) {
-
-	// Saving to HOME/sythetis/ if path is empty
-
 	if len(path) > 1 {
 		return nil, fmt.Errorf("more then 1 path string is not allowed")
 	}
@@ -87,8 +78,7 @@ func Open(path ...string) (*DB, error) {
 		if err != nil {
 			panic(err)
 		}
-
-		pt = filepath.Join(home, "synthetis", "metrics.wal")
+		pt = filepath.Join(home, "synthetis", "metrics.bin")
 	} else {
 		pt = path[0]
 	}
@@ -155,7 +145,7 @@ func (db *DB) Close() error {
 	return err
 }
 
-func (db *DB) Write(metric string, labels map[string]string, value ...interface{}) error {
+func (db *DB) Write(metric string, labels map[string]string, value ...float64) error {
 	points := make([]Point, len(value))
 
 	ts := time.Now().UnixNano()
@@ -177,12 +167,10 @@ func (db *DB) Write(metric string, labels map[string]string, value ...interface{
 	}
 
 	labelsCopy := cloneLabels(batch.Labels)
-
 	pointsCopy := make([]Point, len(batch.Points))
 	copy(pointsCopy, batch.Points)
 
 	rec := walRecord{
-		Type:   "write",
 		Metric: batch.Metric,
 		Labels: labelsCopy,
 		Points: pointsCopy,
@@ -211,7 +199,7 @@ func (db *DB) Write(metric string, labels map[string]string, value ...interface{
 	return nil
 }
 
-func (db *DB) Query(metric string, labels map[string]string, time int) ([]SeriesResult, error) {
+func (db *DB) Query(metric string, labels map[string]string, timeBefore int) ([]SeriesResult, error) {
 	if metric == "" {
 		return nil, errors.New("metric is required")
 	}
@@ -229,7 +217,7 @@ func (db *DB) Query(metric string, labels map[string]string, time int) ([]Series
 				continue
 			}
 
-			points := filterPointsByTime(s.points, time)
+			points := filterPointsByTime(s.points, timeBefore)
 			if len(points) == 0 {
 				continue
 			}
@@ -249,7 +237,7 @@ func (db *DB) Query(metric string, labels map[string]string, time int) ([]Series
 func (db *DB) walLoop() {
 	defer close(db.walDone)
 
-	ticker := time.NewTicker(10 * time.Millisecond)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -266,6 +254,124 @@ func (db *DB) walLoop() {
 	}
 }
 
+// encodeWALRecord serializing writes in bytes
+// format:
+// [Len Metric (2)] [Metric Bytes]
+// [Count Labels (2)] -> ([Len Key (2)] [Key] [Len Val (2)] [Val]) * N
+// [Count Points (2)] -> ([Timestamp (8)] [Value (8)]) * N
+func encodeWALRecord(rec walRecord) []byte {
+	// 2 + len(metric) + 2 + (len_labels * avg_label_len) + 2 + (len_points * 16)
+	estimatedSize := 2 + len(rec.Metric) + 2 + len(rec.Labels)*20 + 2 + len(rec.Points)*16
+	buf := make([]byte, 0, estimatedSize)
+
+	// metric
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(rec.Metric)))
+	buf = append(buf, rec.Metric...)
+
+	// labels
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(rec.Labels)))
+	for k, v := range rec.Labels {
+		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(k)))
+		buf = append(buf, k...)
+		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(v)))
+		buf = append(buf, v...)
+	}
+
+	// points
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(rec.Points)))
+	for _, p := range rec.Points {
+		buf = binary.LittleEndian.AppendUint64(buf, uint64(p.Timestamp))
+		buf = binary.LittleEndian.AppendUint64(buf, math.Float64bits(p.Value))
+	}
+
+	return buf
+}
+
+func decodeWALRecord(data []byte) (walRecord, error) {
+	var rec walRecord
+	offset := 0
+	maxLen := len(data)
+
+	checkBounds := func(n int) bool {
+		return offset+n <= maxLen
+	}
+
+	// metric
+	if !checkBounds(2) {
+		return rec, io.ErrUnexpectedEOF
+	}
+	metricLen := int(binary.LittleEndian.Uint16(data[offset:]))
+	offset += 2
+
+	if !checkBounds(metricLen) {
+		return rec, io.ErrUnexpectedEOF
+	}
+	rec.Metric = string(data[offset : offset+metricLen])
+	offset += metricLen
+
+	// labels
+	if !checkBounds(2) {
+		return rec, io.ErrUnexpectedEOF
+	}
+	labelsCount := int(binary.LittleEndian.Uint16(data[offset:]))
+	offset += 2
+
+	rec.Labels = make(map[string]string, labelsCount)
+	for i := 0; i < labelsCount; i++ {
+		// key
+		if !checkBounds(2) {
+			return rec, io.ErrUnexpectedEOF
+		}
+		kLen := int(binary.LittleEndian.Uint16(data[offset:]))
+		offset += 2
+		if !checkBounds(kLen) {
+			return rec, io.ErrUnexpectedEOF
+		}
+		key := string(data[offset : offset+kLen])
+		offset += kLen
+
+		// value
+		if !checkBounds(2) {
+			return rec, io.ErrUnexpectedEOF
+		}
+		vLen := int(binary.LittleEndian.Uint16(data[offset:]))
+		offset += 2
+		if !checkBounds(vLen) {
+			return rec, io.ErrUnexpectedEOF
+		}
+		val := string(data[offset : offset+vLen])
+		offset += vLen
+
+		rec.Labels[key] = val
+	}
+
+	// points
+	if !checkBounds(2) {
+		return rec, io.ErrUnexpectedEOF
+	}
+	pointsCount := int(binary.LittleEndian.Uint16(data[offset:]))
+	offset += 2
+
+	rec.Points = make([]Point, pointsCount)
+	if !checkBounds(pointsCount * 16) {
+		return rec, io.ErrUnexpectedEOF
+	}
+
+	for i := 0; i < pointsCount; i++ {
+		ts := int64(binary.LittleEndian.Uint64(data[offset:]))
+		offset += 8
+		valBits := binary.LittleEndian.Uint64(data[offset:])
+		offset += 8
+
+		rec.Points[i] = Point{
+			Timestamp: ts,
+			Value:     math.Float64frombits(valBits),
+		}
+	}
+
+	return rec, nil
+}
+
 func (db *DB) writeWALRecord(rec walRecord) {
 	db.walMu.Lock()
 	defer db.walMu.Unlock()
@@ -274,13 +380,19 @@ func (db *DB) writeWALRecord(rec walRecord) {
 		return
 	}
 
-	b, err := json.Marshal(rec)
-	if err != nil {
+	payload := encodeWALRecord(rec)
+	payloadLen := uint32(len(payload))
+
+	var lenBuf [4]byte
+	binary.LittleEndian.PutUint32(lenBuf[:], payloadLen)
+
+	if _, err := db.walBuf.Write(lenBuf[:]); err != nil {
 		return
 	}
 
-	_, _ = db.walBuf.Write(b)
-	_ = db.walBuf.WriteByte('\n')
+	if _, err := db.walBuf.Write(payload); err != nil {
+		return
+	}
 }
 
 func (db *DB) flushWAL() {
@@ -298,26 +410,42 @@ func (db *DB) flushWAL() {
 func (db *DB) replayWAL() error {
 	f, err := os.Open(db.path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	reader := bufio.NewReader(f)
+	lenBuf := make([]byte, 4)
+
+	for {
+		_, err := io.ReadFull(reader, lenBuf)
+		if err == io.EOF {
+			break
 		}
-		var rec walRecord
-		if err := json.Unmarshal(line, &rec); err != nil {
+		if err != nil {
 			return err
 		}
-		if rec.Type != "write" {
-			continue
+
+		payloadLen := binary.LittleEndian.Uint32(lenBuf)
+
+		payload := make([]byte, payloadLen)
+		_, err = io.ReadFull(reader, payload)
+		if err != nil {
+			return fmt.Errorf("unexpected EOF while reading WAL payload")
 		}
+
+		rec, err := decodeWALRecord(payload)
+		if err != nil {
+			return fmt.Errorf("corrupted WAL record: %v", err)
+		}
+
 		db.applyRecord(rec)
 	}
-	return scanner.Err()
+
+	return nil
 }
 
 func (db *DB) applyRecord(rec walRecord) {
@@ -340,6 +468,13 @@ func (db *DB) applyRecord(rec walRecord) {
 	for _, p := range rec.Points {
 		insertPointSorted(&ser.points, p)
 	}
+}
+
+func (db *DB) DrainWAL() {
+	for len(db.walCh) > 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	db.flushWAL()
 }
 
 func hashSeries(metric string, labels map[string]string) seriesID {
@@ -399,16 +534,16 @@ func insertPointSorted(points *[]Point, p Point) {
 	*points = ps
 }
 
-func filterPointsByTime(points []Point, time_before int) []Point {
+func filterPointsByTime(points []Point, timeBefore int) []Point {
 	if len(points) == 0 {
 		return nil
 	}
 
-	if time_before == 0 {
+	if timeBefore == 0 {
 		return points
 	}
 
-	cutoff := time.Now().Add(-time.Duration(time_before) * time.Minute).UnixNano()
+	cutoff := time.Now().Add(-time.Duration(timeBefore) * time.Minute).UnixNano()
 
 	start := sort.Search(len(points), func(i int) bool {
 		return points[i].Timestamp >= cutoff
