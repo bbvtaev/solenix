@@ -1,12 +1,20 @@
 GO      ?= go
 PKG     := ./...
-MOD     := github.com/bbvtaev/synthetis
-BINARY  := synthetis-bench
+MOD     := github.com/bbvtaev/pulse-core
+BINARY  := pulse
+PROTO   := api/proto/pulse.proto
 
 BENCH_TIME ?= 10s
 
 .PHONY: all
-all: fmt test
+all: proto fmt test
+
+.PHONY: proto
+proto:
+	protoc \
+		--go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		$(PROTO)
 
 .PHONY: fmt
 fmt:
@@ -39,9 +47,7 @@ bench-prof:
 		-cpuprofile=cpu.out -memprofile=mem.out $(PKG)
 	@echo "CPU profile: cpu.out"
 	@echo "Mem profile: mem.out"
-	@echo "Примеры:"
-	@echo "  go tool pprof cpu.out"
-	@echo "  go tool pprof mem.out"
+	@echo "Run: go tool pprof cpu.out"
 
 .PHONY: lint
 lint:
@@ -49,11 +55,11 @@ lint:
 
 .PHONY: build
 build:
-	$(GO) build -o bin/$(BINARY) ./cmd/$(BINARY)
+	$(GO) build -o bin/$(BINARY) ./cmd
 
 .PHONY: build-all
 build-all:
-	$(GO) build ./...
+	$(GO) build $(PKG)
 
 .PHONY: clean
 clean:

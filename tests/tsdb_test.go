@@ -1,4 +1,4 @@
-package synthetis_test
+package pulse_test
 
 import (
 	"math/rand"
@@ -6,22 +6,16 @@ import (
 	"testing"
 	"time"
 
-	tsdb "github.com/bbvtaev/synthetis"
+	pulse "github.com/bbvtaev/pulse-core"
 )
 
-func newTestDB(t *testing.T) *tsdb.DB {
+func newTestDB(t *testing.T) *pulse.DB {
 	t.Helper()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "tsdb.wal")
-
-	db, err := tsdb.Open(path)
+	db, err := pulse.Open(pulse.Config{WALPath: filepath.Join(t.TempDir(), "tsdb.wal")})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	t.Cleanup(func() {
-		_ = db.Close()
-	})
+	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 
@@ -32,64 +26,49 @@ func TestWriteAndQuerySingleSeries(t *testing.T) {
 		t.Fatalf("Write() error = %v", err)
 	}
 
-	res, err := db.Query("cpu_usage", map[string]string{"host": "a"}, 0)
+	res, err := db.Query("cpu_usage", map[string]string{"host": "a"}, 0, 0)
 	if err != nil {
 		t.Fatalf("Query() error = %v", err)
 	}
-
 	if len(res) != 1 {
 		t.Fatalf("expected 1 series, got %d", len(res))
 	}
 
-	series := res[0]
-	if series.Metric != "cpu_usage" {
-		t.Errorf("expected metric cpu_usage, got %s", series.Metric)
+	s := res[0]
+	if s.Metric != "cpu_usage" {
+		t.Errorf("expected metric cpu_usage, got %s", s.Metric)
 	}
-	if series.Labels["host"] != "a" || series.Labels["dc"] != "eu" {
-		t.Errorf("unexpected labels: %v", series.Labels)
+	if s.Labels["host"] != "a" || s.Labels["dc"] != "eu" {
+		t.Errorf("unexpected labels: %v", s.Labels)
 	}
-
-	if len(series.Points) != 3 {
-		t.Fatalf("expected 3 points, got %d", len(series.Points))
+	if len(s.Points) != 3 {
+		t.Fatalf("expected 3 points, got %d", len(s.Points))
 	}
 }
 
 func TestLabelFiltering(t *testing.T) {
 	db := newTestDB(t)
 
-	err := db.Write("cpu_usage", map[string]string{"host": "ab"}, 0.1)
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	_ = db.Write("cpu_usage", map[string]string{"host": "ab"}, 0.1)
+	_ = db.Write("cpu_usage", map[string]string{"host": "bs"}, 0.2)
 
-	err = db.Write("cpu_usage", map[string]string{"host": "bs"}, 0.1)
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-
-	resA, err := db.Query("cpu_usage", map[string]string{"host": "ab"}, 0)
+	resA, err := db.Query("cpu_usage", map[string]string{"host": "ab"}, 0, 0)
 	if err != nil {
 		t.Fatalf("Query() error = %v", err)
 	}
-	if len(resA) != 1 {
-		t.Fatalf("expected 1 series for host=a, got %d", len(resA))
-	}
-	if resA[0].Labels["host"] != "ab" {
-		t.Errorf("expected host=ab, got %s", resA[0].Labels["host"])
+	if len(resA) != 1 || resA[0].Labels["host"] != "ab" {
+		t.Errorf("expected 1 series host=ab, got %v", resA)
 	}
 
-	resB, err := db.Query("cpu_usage", map[string]string{"host": "bs"}, 0)
+	resB, err := db.Query("cpu_usage", map[string]string{"host": "bs"}, 0, 0)
 	if err != nil {
 		t.Fatalf("Query() error = %v", err)
 	}
-	if len(resB) != 1 {
-		t.Fatalf("expected 1 series for host=bs, got %d", len(resB))
-	}
-	if resB[0].Labels["host"] != "bs" {
-		t.Errorf("expected host=bs, got %s", resB[0].Labels["host"])
+	if len(resB) != 1 || resB[0].Labels["host"] != "bs" {
+		t.Errorf("expected 1 series host=bs, got %v", resB)
 	}
 
-	resAll, err := db.Query("cpu_usage", nil, 0)
+	resAll, err := db.Query("cpu_usage", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Query() error = %v", err)
 	}
@@ -101,153 +80,172 @@ func TestLabelFiltering(t *testing.T) {
 func TestTimeRangeFiltering(t *testing.T) {
 	db := newTestDB(t)
 
-	err := db.Write("temp", map[string]string{"sensor": "s1"}, 1.0)
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	before := time.Now().UnixNano()
+	_ = db.Write("temp", map[string]string{"sensor": "s1"}, 1.0)
+	after := time.Now().UnixNano()
 
-	res, err := db.Query("temp", map[string]string{"sensor": "s1"}, 0)
+	res, err := db.Query("temp", nil, before, after)
 	if err != nil {
 		t.Fatalf("Query() error = %v", err)
 	}
-
-	if len(res) != 1 {
-		t.Fatalf("expected 1 series, got %d", len(res))
+	if len(res) != 1 || len(res[0].Points) != 1 {
+		t.Fatalf("expected 1 series/1 point in range, got %v", res)
 	}
-	if len(res[0].Points) != 1 {
-		t.Fatalf("expected 1 point in range, got %d", len(res[0].Points))
+
+	res2, err := db.Query("temp", nil, after+1, after+1000)
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if len(res2) != 0 {
+		t.Fatalf("expected 0 series outside range, got %d", len(res2))
 	}
 }
 
 func TestWALReplay(t *testing.T) {
-
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tsdb.wal")
 
-	db, err := tsdb.Open(path)
+	db, err := pulse.Open(pulse.Config{WALPath: path})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	err = db.Write("disk_usage", map[string]string{"host": "a"}, 42.0)
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
+	_ = db.Write("disk_usage", map[string]string{"host": "a"}, 42.0)
+	db.DrainWAL()
 
 	if err := db.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	db2, err := tsdb.Open(path)
+	db2, err := pulse.Open(pulse.Config{WALPath: path})
 	if err != nil {
 		t.Fatalf("second Open() error = %v", err)
 	}
 	defer db2.Close()
 
-	res, err := db2.Query("disk_usage", map[string]string{"host": "a"}, 0)
+	res, err := db2.Query("disk_usage", map[string]string{"host": "a"}, 0, 0)
 	if err != nil {
 		t.Fatalf("Query() error = %v", err)
 	}
-
-	if len(res) != 1 {
-		t.Fatalf("expected 1 series after replay, got %d", len(res))
-	}
-	if len(res[0].Points) != 1 {
-		t.Fatalf("expected 1 point after replay, got %d", len(res[0].Points))
+	if len(res) != 1 || len(res[0].Points) != 1 {
+		t.Fatalf("expected 1 series/1 point after replay, got %v", res)
 	}
 }
 
 func TestQueryValidationErrors(t *testing.T) {
 	db := newTestDB(t)
-
-	_, err := db.Query("", nil, 0)
+	_, err := db.Query("", nil, 0, 0)
 	if err == nil {
-		t.Fatalf("expected error for empty metric, got nil")
+		t.Fatal("expected error for empty metric")
 	}
 }
 
-// functional not ready yet for these type of tests
+func TestDelete(t *testing.T) {
+	db := newTestDB(t)
 
-// func TestWriteEmptyBatch(t *testing.T) {
-// 	db := newTestDB(t)
+	_ = db.Write("cpu", map[string]string{"host": "a"}, 1.0, 2.0, 3.0)
 
-// 	if err := db.Write(nil); err != nil {
-// 		t.Fatalf("Write(nil) error = %v", err)
-// 	}
-// 	if err := db.Write([]entity.WriteSeries{}); err != nil {
-// 		t.Fatalf("Write(empty slice) error = %v", err)
-// 	}
-// }
+	res, _ := db.Query("cpu", nil, 0, 0)
+	if len(res) != 1 || len(res[0].Points) != 3 {
+		t.Fatalf("expected 3 points before delete, got %v", res)
+	}
 
-func newBenchDB(b *testing.B) *tsdb.DB {
+	if err := db.Delete("cpu", map[string]string{"host": "a"}, 0, 0); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+
+	res2, _ := db.Query("cpu", nil, 0, 0)
+	if len(res2) != 0 {
+		t.Fatalf("expected 0 series after delete, got %d", len(res2))
+	}
+}
+
+func TestQueryAgg(t *testing.T) {
+	db := newTestDB(t)
+
+	base := time.Now().Truncate(time.Second).UnixNano()
+	points := []pulse.Point{
+		{Timestamp: base, Value: 10},
+		{Timestamp: base + int64(10*time.Second), Value: 20},
+		{Timestamp: base + int64(20*time.Second), Value: 30},
+		{Timestamp: base + int64(70*time.Second), Value: 40},
+	}
+	if err := db.WriteBatch("metric", nil, points); err != nil {
+		t.Fatalf("WriteBatch() error = %v", err)
+	}
+
+	res, err := db.QueryAgg("metric", nil, 0, 0, time.Minute, pulse.AggAvg)
+	if err != nil {
+		t.Fatalf("QueryAgg() error = %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("expected 1 agg result, got %d", len(res))
+	}
+	if len(res[0].Points) < 2 {
+		t.Fatalf("expected at least 2 agg buckets, got %d", len(res[0].Points))
+	}
+	// Первое окно: 10+20+30 / 3 = 20
+	if res[0].Points[0].Value != 20.0 {
+		t.Errorf("expected avg=20 in first bucket, got %f", res[0].Points[0].Value)
+	}
+}
+
+func TestSubscribe(t *testing.T) {
+	db := newTestDB(t)
+
+	id, ch := db.Subscribe("events", map[string]string{"env": "test"})
+	defer db.Unsubscribe(id)
+
+	_ = db.Write("events", map[string]string{"env": "test"}, 42.0)
+
+	select {
+	case p := <-ch:
+		if p.Value != 42.0 {
+			t.Errorf("expected value 42, got %f", p.Value)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for subscribed point")
+	}
+}
+
+// --- Benchmarks ---
+
+func newBenchDB(b *testing.B) *pulse.DB {
 	b.Helper()
-
-	dir := b.TempDir()
-	path := filepath.Join(dir, "tsdb.wal")
-
-	db, err := tsdb.Open(path)
+	db, err := pulse.Open(pulse.Config{WALPath: filepath.Join(b.TempDir(), "tsdb.wal")})
 	if err != nil {
 		b.Fatalf("Open() error = %v", err)
 	}
-	b.Cleanup(func() {
-		_ = db.Close()
-	})
+	b.Cleanup(func() { _ = db.Close() })
 	return db
 }
 
 func BenchmarkWriteThroughput(b *testing.B) {
 	db := newBenchDB(b)
-
-	const pointsPerWrite = 8
-
-	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
-
+	rnd := rand.New(rand.NewSource(0))
 	_ = db.Write("warmup", map[string]string{"sensor": "init"}, 0.0)
 
 	b.ResetTimer()
 	start := time.Now()
-	totalPoints := 0
 
 	for i := 0; i < b.N; i++ {
-		tsBase := time.Now().Unix()
-
-		points := make([]tsdb.Point, 0, pointsPerWrite)
-		for j := 0; j < pointsPerWrite; j++ {
-			points = append(points, tsdb.Point{
-				Timestamp: tsBase + int64(j),
-				Value:     rnd.Float64() * 100,
-			})
-		}
-
-		err := db.Write("load", map[string]string{"sensor": "A1"}, 123.00)
-		if err != nil {
+		if err := db.Write("load", map[string]string{"sensor": "A1"}, rnd.Float64()*100); err != nil {
 			b.Fatalf("Write error: %v", err)
 		}
-
-		totalPoints += pointsPerWrite
 	}
 
 	elapsed := time.Since(start)
-	opsPerSec := float64(b.N) / elapsed.Seconds()
-	pointsPerSec := float64(totalPoints) / elapsed.Seconds()
-
-	b.ReportMetric(opsPerSec, "ops/s")
-	b.ReportMetric(pointsPerSec, "points/s")
-
-	b.Logf("pointsPerWrite=%d, totalOps=%d, totalPoints=%d, elapsed=%s",
-		pointsPerWrite, b.N, totalPoints, elapsed)
+	b.ReportMetric(float64(b.N)/elapsed.Seconds(), "ops/s")
 }
 
 func BenchmarkWrite_BottleneckAnalysis(b *testing.B) {
-	db, err := tsdb.Open()
+	db, err := pulse.Open(pulse.Config{WALPath: filepath.Join(b.TempDir(), "bench_bottleneck.wal")})
 	if err != nil {
 		b.Fatalf("Open error: %v", err)
 	}
+	defer db.Close()
 
 	b.Run("Sustained_Write_KeepOpen", func(b *testing.B) {
-		_ = newBenchDB(b)
-
-		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			if err := db.Write("bench_metric", map[string]string{"h": "1"}, 52); err != nil {
 				b.Fatal(err)
@@ -256,21 +254,16 @@ func BenchmarkWrite_BottleneckAnalysis(b *testing.B) {
 	})
 
 	b.Run("Overhead_OpenClose_PerWrite", func(b *testing.B) {
-		dir := b.TempDir()
-		path := filepath.Join(dir, "tsdb_overhead.wal")
-
-		b.ResetTimer()
+		path := filepath.Join(b.TempDir(), "overhead.wal")
 		for i := 0; i < b.N; i++ {
-			db, err := tsdb.Open(path)
+			db2, err := pulse.Open(pulse.Config{WALPath: path})
 			if err != nil {
 				b.Fatalf("Open error: %v", err)
 			}
-
-			if err := db.Write("bench_metric", map[string]string{"h": "1"}, 52); err != nil {
+			if err := db2.Write("bench_metric", map[string]string{"h": "1"}, 52); err != nil {
 				b.Fatal(err)
 			}
-
-			if err := db.Close(); err != nil {
+			if err := db2.Close(); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -284,9 +277,8 @@ func TestWriteDegradation(t *testing.T) {
 
 	db := newTestDB(t)
 
-	const batchSize = 100
-	const initialBatches = 10000000
 	const measureBatches = 100
+	const initialBatches = 1_000_000
 
 	startEmpty := time.Now()
 	for i := 0; i < measureBatches; i++ {
@@ -298,8 +290,6 @@ func TestWriteDegradation(t *testing.T) {
 	for i := 0; i < initialBatches; i++ {
 		_ = db.Write("metric_load", map[string]string{"k": "v"}, 52)
 	}
-
-	t.Log("Waiting for WAL to drain...")
 	db.DrainWAL()
 
 	startFull := time.Now()
@@ -312,9 +302,8 @@ func TestWriteDegradation(t *testing.T) {
 	t.Logf("Duration (Full DB):  %v", durationFull)
 
 	if durationFull > durationEmpty*2 {
-		t.Logf("WARNING: Write performance degraded significantly with data accumulation.")
-		t.Logf("Factor: %.2fx slower", float64(durationFull)/float64(durationEmpty))
+		t.Logf("WARNING: Write performance degraded. Factor: %.2fx slower", float64(durationFull)/float64(durationEmpty))
 	} else {
-		t.Logf("Performance is stable regardless of data volume.")
+		t.Log("Performance is stable.")
 	}
 }

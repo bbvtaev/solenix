@@ -1,38 +1,18 @@
-package synthetis
+package pulse
 
 import (
-	"bufio"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-const Version = "1.3.0-alpha"
-
-type Point struct {
-	Timestamp int64   `json:"timestamp"`
-	Value     float64 `json:"value"`
-}
-
-type WriteSeries struct {
-	Metric string            `json:"metric"`
-	Labels map[string]string `json:"labels"`
-	Points []Point           `json:"points"`
-}
-
-type SeriesResult struct {
-	Metric string            `json:"metric"`
-	Labels map[string]string `json:"labels"`
-	Points []Point           `json:"points"`
-}
+const numShards = 128
 
 type seriesID uint64
 
@@ -42,408 +22,170 @@ type series struct {
 	points []Point
 }
 
-type walRecord struct {
-	Metric string
-	Labels map[string]string
-	Points []Point
-}
-
-const numShards = 128
-
 type seriesShard struct {
 	mu     sync.RWMutex
 	series map[seriesID]*series
 }
 
-type DB struct {
-	shards [numShards]seriesShard
-
-	walMu  sync.Mutex
-	wal    *os.File
-	walBuf *bufio.Writer
-	path   string
-
-	walCh   chan walRecord
-	walDone chan struct{}
+type subscription struct {
+	metric string
+	labels map[string]string
+	ch     chan Point
 }
 
-func Open(path ...string) (*DB, error) {
-	if len(path) > 1 {
-		return nil, fmt.Errorf("more then 1 path string is not allowed")
+type DB struct {
+	shards    [numShards]seriesShard
+	metricIdx *metricIndex
+
+	w      *wal
+	path   string
+	config Config
+
+	closeCh chan struct{}
+	walDone chan struct{}
+
+	subsMu sync.RWMutex
+	subs   map[uint64]*subscription
+	subSeq atomic.Uint64
+}
+
+// Open открывает (или создаёт) БД согласно конфигу.
+// Незаполненные поля получают значения из DefaultConfig().
+func Open(cfg Config) (*DB, error) {
+	def := DefaultConfig()
+	if cfg.WALPath == "" {
+		cfg.WALPath = def.WALPath
+	}
+	if cfg.FlushInterval == 0 {
+		cfg.FlushInterval = def.FlushInterval
+	}
+	if cfg.Mode == "" {
+		cfg.Mode = def.Mode
+	}
+	if cfg.GRPCAddr == "" {
+		cfg.GRPCAddr = def.GRPCAddr
 	}
 
-	var pt string
-	if len(path) == 0 {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			panic(err)
-		}
-		pt = filepath.Join(home, "synthetis", "metrics.bin")
-	} else {
-		pt = path[0]
-	}
-
-	if err := os.MkdirAll(filepath.Dir(pt), 0o755); err != nil {
-		return nil, err
-	}
-
-	f, err := os.OpenFile(pt, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644)
-	if err != nil {
+	if err := os.MkdirAll(filepath.Dir(cfg.WALPath), 0o755); err != nil {
 		return nil, err
 	}
 
 	db := &DB{
-		wal:     f,
-		walBuf:  bufio.NewWriterSize(f, 1<<20), // 1 MiB
-		path:    pt,
-		walCh:   make(chan walRecord, 4096),
-		walDone: make(chan struct{}),
+		metricIdx: newMetricIndex(),
+		path:      cfg.WALPath,
+		config:    cfg,
+		closeCh:   make(chan struct{}),
+		walDone:   make(chan struct{}),
+		subs:      make(map[uint64]*subscription),
 	}
-
 	for i := range db.shards {
 		db.shards[i].series = make(map[seriesID]*series)
 	}
 
-	if err := db.replayWAL(); err != nil {
-		_ = f.Close()
-		return nil, err
+	// Сначала replay WAL в память
+	records, err := replayWAL(cfg.WALPath)
+	if err != nil {
+		return nil, fmt.Errorf("replay WAL: %w", err)
+	}
+	for _, rec := range records {
+		db.applyRecord(rec)
 	}
 
-	go db.walLoop()
+	// Затем открываем WAL для записи (O_APPEND)
+	w, err := openWAL(cfg.WALPath)
+	if err != nil {
+		return nil, err
+	}
+	db.w = w
+
+	go db.bgLoop()
 
 	return db, nil
 }
 
-func (db *DB) shardFor(id seriesID) *seriesShard {
-	return &db.shards[uint64(id)%numShards]
-}
-
-func (db *DB) Close() error {
-	db.walMu.Lock()
-	if db.walCh != nil {
-		close(db.walCh)
-	}
-	db.walMu.Unlock()
-
-	if db.walDone != nil {
-		<-db.walDone
-	}
-
-	db.walMu.Lock()
-	defer db.walMu.Unlock()
-
-	if db.walBuf != nil {
-		_ = db.walBuf.Flush()
-	}
-	if db.wal == nil {
-		return nil
-	}
-
-	err := db.wal.Close()
-	db.wal = nil
-	db.walBuf = nil
-	return err
-}
-
-func (db *DB) Write(metric string, labels map[string]string, value ...float64) error {
-	points := make([]Point, len(value))
-
-	ts := time.Now().UnixNano()
-	for i, v := range value {
-		points[i] = Point{
-			Timestamp: ts,
-			Value:     v,
-		}
-	}
-
-	batch := WriteSeries{
-		Metric: metric,
-		Labels: labels,
-		Points: points,
-	}
-
-	if len(batch.Points) == 0 {
-		return fmt.Errorf("points must be more than zero")
-	}
-
-	labelsCopy := cloneLabels(batch.Labels)
-	pointsCopy := make([]Point, len(batch.Points))
-	copy(pointsCopy, batch.Points)
-
-	rec := walRecord{
-		Metric: batch.Metric,
-		Labels: labelsCopy,
-		Points: pointsCopy,
-	}
-
-	db.walCh <- rec
-
-	id := hashSeries(batch.Metric, labelsCopy)
-	sh := db.shardFor(id)
-
-	sh.mu.Lock()
-	ser, ok := sh.series[id]
-	if !ok {
-		ser = &series{
-			metric: batch.Metric,
-			labels: labelsCopy,
-			points: make([]Point, 0, len(batch.Points)),
-		}
-		sh.series[id] = ser
-	}
-	for _, p := range batch.Points {
-		insertPointSorted(&ser.points, p)
-	}
-	sh.mu.Unlock()
-
-	return nil
-}
-
-func (db *DB) Query(metric string, labels map[string]string, timeBefore int) ([]SeriesResult, error) {
-	if metric == "" {
-		return nil, errors.New("metric is required")
-	}
-
-	var res []SeriesResult
-
-	for i := range db.shards {
-		sh := &db.shards[i]
-		sh.mu.RLock()
-		for _, s := range sh.series {
-			if s.metric != metric {
-				continue
-			}
-			if !labelsMatch(labels, s.labels) {
-				continue
-			}
-
-			points := filterPointsByTime(s.points, timeBefore)
-			if len(points) == 0 {
-				continue
-			}
-
-			res = append(res, SeriesResult{
-				Metric: s.metric,
-				Labels: cloneLabels(s.labels),
-				Points: points,
-			})
-		}
-		sh.mu.RUnlock()
-	}
-
-	return res, nil
-}
-
-func (db *DB) walLoop() {
+func (db *DB) bgLoop() {
 	defer close(db.walDone)
 
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	flushTicker := time.NewTicker(db.config.FlushInterval)
+	defer flushTicker.Stop()
+
+	var retentionC <-chan time.Time
+	if db.config.RetentionDuration > 0 {
+		interval := db.config.RetentionDuration / 10
+		if interval < time.Minute {
+			interval = time.Minute
+		}
+		rt := time.NewTicker(interval)
+		defer rt.Stop()
+		retentionC = rt.C
+	}
 
 	for {
 		select {
-		case rec, ok := <-db.walCh:
-			if !ok {
-				db.flushWAL()
-				return
-			}
-			db.writeWALRecord(rec)
-		case <-ticker.C:
-			db.flushWAL()
+		case <-db.closeCh:
+			db.w.flush()
+			return
+		case <-flushTicker.C:
+			db.w.flush()
+		case <-retentionC:
+			db.enforceRetention()
 		}
 	}
 }
 
-// encodeWALRecord serializing writes in bytes
-// format:
-// [Len Metric (2)] [Metric Bytes]
-// [Count Labels (2)] -> ([Len Key (2)] [Key] [Len Val (2)] [Val]) * N
-// [Count Points (2)] -> ([Timestamp (8)] [Value (8)]) * N
-func encodeWALRecord(rec walRecord) []byte {
-	// 2 + len(metric) + 2 + (len_labels * avg_label_len) + 2 + (len_points * 16)
-	estimatedSize := 2 + len(rec.Metric) + 2 + len(rec.Labels)*20 + 2 + len(rec.Points)*16
-	buf := make([]byte, 0, estimatedSize)
-
-	// metric
-	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(rec.Metric)))
-	buf = append(buf, rec.Metric...)
-
-	// labels
-	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(rec.Labels)))
-	for k, v := range rec.Labels {
-		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(k)))
-		buf = append(buf, k...)
-		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(v)))
-		buf = append(buf, v...)
-	}
-
-	// points
-	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(rec.Points)))
-	for _, p := range rec.Points {
-		buf = binary.LittleEndian.AppendUint64(buf, uint64(p.Timestamp))
-		buf = binary.LittleEndian.AppendUint64(buf, math.Float64bits(p.Value))
-	}
-
-	return buf
+func (db *DB) Close() error {
+	close(db.closeCh)
+	<-db.walDone
+	return db.w.close()
 }
 
-func decodeWALRecord(data []byte) (walRecord, error) {
-	var rec walRecord
-	offset := 0
-	maxLen := len(data)
-
-	checkBounds := func(n int) bool {
-		return offset+n <= maxLen
+// Write записывает одно или несколько значений для метрики с текущим timestamp.
+// WAL пишется синхронно (в буфер) до обновления памяти — гарантирует порядок durability.
+func (db *DB) Write(metric string, labels map[string]string, value ...float64) error {
+	if metric == "" {
+		return errors.New("metric is required")
+	}
+	if len(value) == 0 {
+		return errors.New("at least one value is required")
 	}
 
-	// metric
-	if !checkBounds(2) {
-		return rec, io.ErrUnexpectedEOF
-	}
-	metricLen := int(binary.LittleEndian.Uint16(data[offset:]))
-	offset += 2
-
-	if !checkBounds(metricLen) {
-		return rec, io.ErrUnexpectedEOF
-	}
-	rec.Metric = string(data[offset : offset+metricLen])
-	offset += metricLen
-
-	// labels
-	if !checkBounds(2) {
-		return rec, io.ErrUnexpectedEOF
-	}
-	labelsCount := int(binary.LittleEndian.Uint16(data[offset:]))
-	offset += 2
-
-	rec.Labels = make(map[string]string, labelsCount)
-	for i := 0; i < labelsCount; i++ {
-		// key
-		if !checkBounds(2) {
-			return rec, io.ErrUnexpectedEOF
-		}
-		kLen := int(binary.LittleEndian.Uint16(data[offset:]))
-		offset += 2
-		if !checkBounds(kLen) {
-			return rec, io.ErrUnexpectedEOF
-		}
-		key := string(data[offset : offset+kLen])
-		offset += kLen
-
-		// value
-		if !checkBounds(2) {
-			return rec, io.ErrUnexpectedEOF
-		}
-		vLen := int(binary.LittleEndian.Uint16(data[offset:]))
-		offset += 2
-		if !checkBounds(vLen) {
-			return rec, io.ErrUnexpectedEOF
-		}
-		val := string(data[offset : offset+vLen])
-		offset += vLen
-
-		rec.Labels[key] = val
+	ts := time.Now().UnixNano()
+	points := make([]Point, len(value))
+	for i, v := range value {
+		points[i] = Point{Timestamp: ts, Value: v}
 	}
 
-	// points
-	if !checkBounds(2) {
-		return rec, io.ErrUnexpectedEOF
-	}
-	pointsCount := int(binary.LittleEndian.Uint16(data[offset:]))
-	offset += 2
-
-	rec.Points = make([]Point, pointsCount)
-	if !checkBounds(pointsCount * 16) {
-		return rec, io.ErrUnexpectedEOF
-	}
-
-	for i := 0; i < pointsCount; i++ {
-		ts := int64(binary.LittleEndian.Uint64(data[offset:]))
-		offset += 8
-		valBits := binary.LittleEndian.Uint64(data[offset:])
-		offset += 8
-
-		rec.Points[i] = Point{
-			Timestamp: ts,
-			Value:     math.Float64frombits(valBits),
-		}
-	}
-
-	return rec, nil
+	return db.writeBatch(metric, labels, points)
 }
 
-func (db *DB) writeWALRecord(rec walRecord) {
-	db.walMu.Lock()
-	defer db.walMu.Unlock()
-
-	if db.wal == nil || db.walBuf == nil {
-		return
+// WriteBatch записывает точки с произвольными timestamp (используется gRPC-сервером).
+func (db *DB) WriteBatch(metric string, labels map[string]string, points []Point) error {
+	if metric == "" {
+		return errors.New("metric is required")
 	}
-
-	payload := encodeWALRecord(rec)
-	payloadLen := uint32(len(payload))
-
-	var lenBuf [4]byte
-	binary.LittleEndian.PutUint32(lenBuf[:], payloadLen)
-
-	if _, err := db.walBuf.Write(lenBuf[:]); err != nil {
-		return
+	if len(points) == 0 {
+		return errors.New("at least one point is required")
 	}
-
-	if _, err := db.walBuf.Write(payload); err != nil {
-		return
-	}
+	return db.writeBatch(metric, labels, points)
 }
 
-func (db *DB) flushWAL() {
-	db.walMu.Lock()
-	defer db.walMu.Unlock()
+func (db *DB) writeBatch(metric string, labels map[string]string, points []Point) error {
+	labelsCopy := cloneLabels(labels)
+	pointsCopy := make([]Point, len(points))
+	copy(pointsCopy, points)
 
-	if db.walBuf != nil {
-		_ = db.walBuf.Flush()
+	rec := walRecord{Metric: metric, Labels: labelsCopy, Points: pointsCopy}
+
+	// WAL first — гарантирует durability ordering
+	if err := db.w.write(rec); err != nil {
+		return fmt.Errorf("WAL write: %w", err)
 	}
-	if db.wal != nil {
-		_ = db.wal.Sync()
-	}
-}
 
-func (db *DB) replayWAL() error {
-	f, err := os.Open(db.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	defer f.Close()
+	// Затем in-memory
+	db.applyRecord(rec)
 
-	reader := bufio.NewReader(f)
-	lenBuf := make([]byte, 4)
-
-	for {
-		_, err := io.ReadFull(reader, lenBuf)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-
-		payloadLen := binary.LittleEndian.Uint32(lenBuf)
-
-		payload := make([]byte, payloadLen)
-		_, err = io.ReadFull(reader, payload)
-		if err != nil {
-			return fmt.Errorf("unexpected EOF while reading WAL payload")
-		}
-
-		rec, err := decodeWALRecord(payload)
-		if err != nil {
-			return fmt.Errorf("corrupted WAL record: %v", err)
-		}
-
-		db.applyRecord(rec)
-	}
+	// Уведомляем подписчиков
+	db.notify(metric, labelsCopy, pointsCopy)
 
 	return nil
 }
@@ -453,10 +195,8 @@ func (db *DB) applyRecord(rec walRecord) {
 	sh := db.shardFor(id)
 
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
-
-	ser, ok := sh.series[id]
-	if !ok {
+	ser, exists := sh.series[id]
+	if !exists {
 		ser = &series{
 			metric: rec.Metric,
 			labels: cloneLabels(rec.Labels),
@@ -464,17 +204,98 @@ func (db *DB) applyRecord(rec walRecord) {
 		}
 		sh.series[id] = ser
 	}
-
 	for _, p := range rec.Points {
 		insertPointSorted(&ser.points, p)
 	}
+	sh.mu.Unlock()
+
+	// Добавляем в индекс только для новых серий (после освобождения шард-мьютекса)
+	if !exists {
+		db.metricIdx.add(rec.Metric, id)
+	}
 }
 
-func (db *DB) DrainWAL() {
-	for len(db.walCh) > 0 {
-		time.Sleep(10 * time.Millisecond)
+func (db *DB) enforceRetention() {
+	cutoff := time.Now().Add(-db.config.RetentionDuration).UnixNano()
+
+	for i := range db.shards {
+		sh := &db.shards[i]
+		sh.mu.Lock()
+
+		var toRemove []struct {
+			id     seriesID
+			metric string
+		}
+		for id, ser := range sh.series {
+			start := sort.Search(len(ser.points), func(j int) bool {
+				return ser.points[j].Timestamp >= cutoff
+			})
+			if start > 0 {
+				ser.points = ser.points[start:]
+			}
+			if len(ser.points) == 0 {
+				delete(sh.series, id)
+				toRemove = append(toRemove, struct {
+					id     seriesID
+					metric string
+				}{id, ser.metric})
+			}
+		}
+		sh.mu.Unlock()
+
+		for _, r := range toRemove {
+			db.metricIdx.remove(r.metric, r.id)
+		}
 	}
-	db.flushWAL()
+}
+
+// Subscribe возвращает id подписки и канал, в который будут приходить новые точки.
+func (db *DB) Subscribe(metric string, labels map[string]string) (uint64, <-chan Point) {
+	ch := make(chan Point, 256)
+	sub := &subscription{metric: metric, labels: cloneLabels(labels), ch: ch}
+	id := db.subSeq.Add(1)
+
+	db.subsMu.Lock()
+	db.subs[id] = sub
+	db.subsMu.Unlock()
+
+	return id, ch
+}
+
+// Unsubscribe закрывает подписку и канал.
+func (db *DB) Unsubscribe(id uint64) {
+	db.subsMu.Lock()
+	if sub, ok := db.subs[id]; ok {
+		delete(db.subs, id)
+		close(sub.ch)
+	}
+	db.subsMu.Unlock()
+}
+
+func (db *DB) notify(metric string, labels map[string]string, points []Point) {
+	db.subsMu.RLock()
+	defer db.subsMu.RUnlock()
+
+	for _, sub := range db.subs {
+		if sub.metric != metric || !labelsMatch(sub.labels, labels) {
+			continue
+		}
+		for _, p := range points {
+			select {
+			case sub.ch <- p:
+			default: // дроп если подписчик медленный
+			}
+		}
+	}
+}
+
+// DrainWAL принудительно сбрасывает WAL на диск (fsync).
+func (db *DB) DrainWAL() {
+	db.w.flush()
+}
+
+func (db *DB) shardFor(id seriesID) *seriesShard {
+	return &db.shards[uint64(id)%numShards]
 }
 
 func hashSeries(metric string, labels map[string]string) seriesID {
@@ -487,14 +308,12 @@ func hashSeries(metric string, labels map[string]string) seriesID {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(metric))
 	_, _ = h.Write([]byte{0})
-
 	for _, k := range keys {
 		_, _ = h.Write([]byte(k))
 		_, _ = h.Write([]byte("="))
 		_, _ = h.Write([]byte(labels[k]))
 		_, _ = h.Write([]byte{0})
 	}
-
 	return seriesID(h.Sum64())
 }
 
@@ -522,7 +341,6 @@ func insertPointSorted(points *[]Point, p Point) {
 	i := sort.Search(n, func(i int) bool {
 		return ps[i].Timestamp >= p.Timestamp
 	})
-
 	if i == n {
 		*points = append(ps, p)
 		return
@@ -532,29 +350,6 @@ func insertPointSorted(points *[]Point, p Point) {
 	copy(ps[i+1:], ps[i:])
 	ps[i] = p
 	*points = ps
-}
-
-func filterPointsByTime(points []Point, timeBefore int) []Point {
-	if len(points) == 0 {
-		return nil
-	}
-
-	if timeBefore == 0 {
-		return points
-	}
-
-	cutoff := time.Now().Add(-time.Duration(timeBefore) * time.Minute).UnixNano()
-
-	start := sort.Search(len(points), func(i int) bool {
-		return points[i].Timestamp >= cutoff
-	})
-	if start == len(points) {
-		return nil
-	}
-
-	out := make([]Point, len(points)-start)
-	copy(out, points[start:])
-	return out
 }
 
 func cloneLabels(src map[string]string) map[string]string {

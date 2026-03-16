@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package pulse;
+
+option go_package = "github.com/bbvtaev/pulse-core/api/proto;pulsepb";
+
+service PulseDB {
+  rpc Write(WriteRequest)         returns (WriteResponse);
+  rpc Query(QueryRequest)         returns (QueryResponse);
+  rpc Delete(DeleteRequest)       returns (DeleteResponse);
+  rpc Subscribe(SubscribeRequest) returns (stream DataPoint);
+  rpc Health(HealthRequest)       returns (HealthResponse);
+}
+
+// --- Shared ---
+
+message DataPoint {
+  int64  timestamp = 1;
+  double value     = 2;
+}
+
+message Series {
+  string              metric = 1;
+  map<string, string> labels = 2;
+  repeated DataPoint  points = 3;
+}
+
+// --- Write ---
+
+message WriteRequest {
+  repeated Series series = 1;
+}
+
+message WriteResponse {
+  int32 written = 1; // количество записанных серий
+}
+
+// --- Query ---
+
+message QueryRequest {
+  string              metric = 1;
+  map<string, string> labels = 2;
+  int64               from   = 3; // Unix nanoseconds, 0 = без ограничения
+  int64               to     = 4; // Unix nanoseconds, 0 = без ограничения
+}
+
+message QueryResponse {
+  repeated Series series = 1;
+}
+
+// --- Delete ---
+
+message DeleteRequest {
+  string              metric = 1;
+  map<string, string> labels = 2;
+  int64               from   = 3;
+  int64               to     = 4;
+}
+
+message DeleteResponse {}
+
+// --- Subscribe ---
+
+message SubscribeRequest {
+  string              metric = 1;
+  map<string, string> labels = 2;
+}
+
+// Subscribe возвращает поток DataPoint по мере поступления новых данных
+
+// --- Health ---
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status  = 1; // "ok"
+  string version = 2;
+}

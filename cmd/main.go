@@ -1,77 +1,62 @@
 package main
 
 import (
-	"fmt"
+	"flag"
 	"log/slog"
-	"math/rand"
-	"sync"
-	"time"
+	"os"
+	"os/signal"
+	"syscall"
 
-	synthetis "github.com/bbvtaev/synthetis"
+	pulse "github.com/bbvtaev/pulse-core"
+	"github.com/bbvtaev/pulse-core/server"
 )
 
-// In main func we have nothing to initialize,
-// but we should create test user that writes,
-// reads and does stuff. That will be localed
-// here, in main.
-
 func main() {
-	start := time.Now()
+	configPath := flag.String("config", "", "path to pulse.yaml config file")
+	flag.Parse()
 
-	sth, err := synthetis.Open("./data/mtx.bin")
-	if err != nil {
-		slog.Info("Error occured", "err", err)
-		return
+	var cfg pulse.Config
+	var err error
+
+	if *configPath != "" {
+		cfg, err = pulse.LoadConfig(*configPath)
+		if err != nil {
+			slog.Error("failed to load config", "path", *configPath, "err", err)
+			os.Exit(1)
+		}
+		slog.Info("loaded config", "path", *configPath)
+	} else {
+		cfg = pulse.DefaultConfig()
+		slog.Info("using default config")
 	}
-	defer sth.Close()
 
-	done := make(chan struct{})
-	var wg sync.WaitGroup
+	db, err := pulse.Open(cfg)
+	if err != nil {
+		slog.Error("failed to open DB", "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
 
-	ticker := time.NewTicker(1 * time.Millisecond)
+	slog.Info("pulse-core started",
+		"mode", cfg.Mode,
+		"wal", cfg.WALPath,
+		"grpc_addr", cfg.GRPCAddr,
+		"retention", cfg.RetentionDuration,
+		"auth", cfg.Auth.Enabled,
+	)
 
-	wg.Add(1)
+	srv := server.New(db)
 	go func() {
-		defer wg.Done()
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				if err := sth.Write("each_millisecond_metric",
-					map[string]string{"user": "pooser"},
-					float64(rand.Intn(34)),
-				); err != nil {
-					slog.Info("Error occured", "err", err)
-					return
-				}
-			}
+		slog.Info("gRPC server listening", "addr", cfg.GRPCAddr)
+		if err := srv.Listen(cfg.GRPCAddr); err != nil {
+			slog.Error("gRPC server error", "err", err)
+			os.Exit(1)
 		}
 	}()
 
-	for i := 0.0; i < 100000; i++ {
-		if err := sth.Write("some_mtx",
-			map[string]string{"host": "a"},
-			i, 52, float64(rand.Intn(52)),
-		); err != nil {
-			slog.Info("Error occured", "err", err)
-			close(done)
-			wg.Wait()
-			return
-		}
-	}
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-quit
 
-	close(done)
-	wg.Wait()
-
-	res, err := sth.Query("each_millisecond_metric", map[string]string{"user": "pooser"}, 1)
-	if err != nil {
-		slog.Info("Error occured", "err", err)
-		return
-	}
-
-	fmt.Println(res)
-	fmt.Println(time.Since(start))
+	slog.Info("shutting down", "signal", sig)
 }

@@ -1,0 +1,26 @@
+# pulse.yaml — конфигурация pulse-core сервера
+# Запуск: ./pulse-core -config pulse.yaml
+
+# Режим работы: self-hosted | cloud
+mode: self-hosted
+
+# gRPC адрес сервера
+grpc_addr: ":50051"
+
+# Путь к WAL файлу (данные на диске)
+wal_path: "./data/metrics.wal"
+
+# Retention policy: как долго хранить точки (0 = вечно)
+# Примеры: "24h", "168h" (7 дней), "720h" (30 дней)
+retention: "720h"
+
+# Как часто сбрасывать WAL на диск
+flush_interval: "100ms"
+
+# Авторизация (только для mode: cloud)
+auth:
+  enabled: false
+  api_keys: []
+  # api_keys:
+  #   - "pk_live_abc123"
+  #   - "pk_live_xyz789"
