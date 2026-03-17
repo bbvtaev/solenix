@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log/slog"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"syscall"
 
 	pulse "github.com/bbvtaev/pulse-core"
+	"github.com/bbvtaev/pulse-core/collector"
 	"github.com/bbvtaev/pulse-core/server"
 )
 
@@ -53,6 +55,23 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+
+	if cfg.Mode == pulse.ModeSelfHosted && cfg.HTTPAddr != "" {
+		httpSrv := server.NewHTTP(db)
+		go func() {
+			slog.Info("UI available", "url", "http://localhost"+cfg.HTTPAddr)
+			if err := httpSrv.ListenHTTP(cfg.HTTPAddr); err != nil {
+				slog.Error("HTTP server error", "err", err)
+			}
+		}()
+	}
+
+	if cfg.Collector.Enabled {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		c := collector.New(db, cfg.Collector)
+		go c.Run(ctx)
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

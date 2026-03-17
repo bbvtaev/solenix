@@ -1,13 +1,33 @@
-// grpc_client_test — ручная проверка gRPC сервера pulse-core.
-// Запусти сервер: go run ./cmd/main.go
-// Запусти клиент: go run ./grpc_client_test/main.go
+// load-gen — генератор погодных метрик для pulse-core.
+//
+// Симулирует данные с метеостанций нескольких городов:
+//   weather_temperature_celsius   — температура воздуха
+//   weather_humidity_percent      — влажность
+//   weather_pressure_hpa          — атмосферное давление
+//   weather_wind_speed_ms         — скорость ветра
+//   weather_wind_direction_deg    — направление ветра
+//   weather_precipitation_mm      — осадки
+//   weather_uv_index              — УФ-индекс
+//   weather_visibility_km         — видимость
+//
+// Флаги:
+//   -addr     адрес сервера       (default: localhost:50051)
+//   -rate     тиков в секунду     (default: 2)
+//   -stations количество станций  (default: все)
+//
+// Управление (stdin): [+] ускорить  [-] замедлить  [q] выйти
 package main
 
 import (
+	"bufio"
 	"context"
+	"flag"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
+	"math"
+	"math/rand"
+	"os"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/bbvtaev/pulse-core/api/proto"
@@ -15,167 +35,258 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-const addr = "localhost:50051"
+// ── Метеостанция ──────────────────────────────────────────────────────────────
+
+type station struct {
+	city    string
+	country string
+	lat     float64 // широта — влияет на базовую температуру
+
+	// внутреннее состояние (плавно меняется)
+	temp        float64
+	humidity    float64
+	pressure    float64
+	windSpeed   float64
+	windDir     float64
+	precip      float64
+	uvIndex     float64
+	visibility  float64
+}
+
+// Реальные города с их широтами
+var defaultStations = []struct {
+	city, country string
+	lat           float64
+}{
+	{"Moscow",        "RU",  55.75},
+	{"London",        "GB",  51.50},
+	{"Tokyo",         "JP",  35.68},
+	{"New York",      "US",  40.71},
+	{"Dubai",         "AE",  25.20},
+	{"Sydney",        "AU", -33.86},
+	{"Reykjavik",     "IS",  64.13},
+	{"Singapore",     "SG",   1.35},
+}
+
+func newStation(city, country string, lat float64, rng *rand.Rand) *station {
+	// Базовая температура зависит от широты и сезона
+	baseTemp := 25 - math.Abs(lat)/90*40 + rng.Float64()*5
+
+	return &station{
+		city:       city,
+		country:    country,
+		lat:        lat,
+		temp:       baseTemp,
+		humidity:   40 + rng.Float64()*40,
+		pressure:   1005 + rng.Float64()*20,
+		windSpeed:  rng.Float64() * 10,
+		windDir:    rng.Float64() * 360,
+		precip:     0,
+		uvIndex:    rng.Float64() * 5,
+		visibility: 5 + rng.Float64()*15,
+	}
+}
+
+// tick обновляет состояние станции и возвращает серии для записи.
+func (s *station) tick(rng *rand.Rand, t float64) []*pb.Series {
+	now := time.Now().UnixNano()
+	labels := map[string]string{
+		"city":    s.city,
+		"country": s.country,
+	}
+
+	// ── Температура: суточный цикл + шум ──
+	hour := (t / 3600) // условный час
+	diurnal := 4 * math.Sin((hour-14)*math.Pi/12) // пик в 14:00
+	s.temp += (diurnal*0.01 + (rng.Float64()-0.5)*0.3)
+	baseTemp := 25 - math.Abs(s.lat)/90*40
+	// Медленный дрейф к базовому значению
+	s.temp += (baseTemp - s.temp) * 0.001
+	s.temp = clamp(s.temp, -50, 55)
+
+	// ── Влажность: обратная зависимость от температуры ──
+	s.humidity += (rng.Float64()-0.5)*1.5 - (s.temp-20)*0.02
+	s.humidity = clamp(s.humidity, 5, 100)
+
+	// ── Давление: медленные волны ──
+	s.pressure += math.Sin(t/3600)*0.05 + (rng.Float64()-0.5)*0.3
+	s.pressure = clamp(s.pressure, 970, 1040)
+
+	// ── Ветер: порывистый ──
+	s.windSpeed += (rng.Float64()-0.5)*1.2
+	s.windSpeed = clamp(s.windSpeed, 0, 35)
+	s.windDir += (rng.Float64()-0.5)*15
+	if s.windDir < 0 { s.windDir += 360 }
+	if s.windDir >= 360 { s.windDir -= 360 }
+
+	// ── Осадки: случайные эпизоды ──
+	if rng.Float64() < 0.05 {
+		s.precip = rng.Float64() * 5 // начало осадков
+	} else {
+		s.precip *= 0.85 // затухание
+	}
+	s.precip = clamp(s.precip, 0, 50)
+
+	// ── УФ-индекс: зависит от широты, 0 ночью ──
+	dayFactor := math.Max(0, math.Sin((hour-6)*math.Pi/12))
+	s.uvIndex = dayFactor * (10 - math.Abs(s.lat)/90*5) * (0.8 + rng.Float64()*0.4)
+	s.uvIndex = clamp(s.uvIndex, 0, 11)
+
+	// ── Видимость: падает при осадках и высокой влажности ──
+	s.visibility = 20 - s.precip*0.5 - (s.humidity-50)*0.05 + (rng.Float64()-0.5)*1
+	s.visibility = clamp(s.visibility, 0.1, 25)
+
+	return []*pb.Series{
+		pt("weather_temperature_celsius", labels, now, round2(s.temp)),
+		pt("weather_humidity_percent",    labels, now, round2(s.humidity)),
+		pt("weather_pressure_hpa",        labels, now, round2(s.pressure)),
+		pt("weather_wind_speed_ms",       labels, now, round2(s.windSpeed)),
+		pt("weather_wind_direction_deg",  labels, now, round2(s.windDir)),
+		pt("weather_precipitation_mm",    labels, now, round2(s.precip)),
+		pt("weather_uv_index",            labels, now, round2(s.uvIndex)),
+		pt("weather_visibility_km",       labels, now, round2(s.visibility)),
+	}
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+func pt(metric string, labels map[string]string, ts int64, value float64) *pb.Series {
+	return &pb.Series{
+		Metric: metric,
+		Labels: labels,
+		Points: []*pb.DataPoint{{Timestamp: ts, Value: value}},
+	}
+}
+
+func clamp(v, min, max float64) float64 {
+	if v < min { return min }
+	if v > max { return max }
+	return v
+}
+
+func round2(v float64) float64 {
+	return math.Round(v*100) / 100
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	addr     := flag.String("addr",     "localhost:50051", "gRPC server address")
+	rate     := flag.Int("rate",        2,                 "ticks per second")
+	nstation := flag.Int("stations",    len(defaultStations), "number of stations (1–8)")
+	flag.Parse()
+
+	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Fatalf("connect: %v", err)
+		slog.Error("connect", "err", err)
+		os.Exit(1)
 	}
 	defer conn.Close()
 
 	c := pb.NewPulseDBClient(conn)
-	ctx := context.Background()
 
-	// ── 1. Health ────────────────────────────────────────────────────────────
-	fmt.Println("=== Health ===")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	health, err := c.Health(ctx, &pb.HealthRequest{})
+	cancel()
 	if err != nil {
-		log.Fatalf("health: %v", err)
+		slog.Error("server not reachable", "addr", *addr, "err", err)
+		os.Exit(1)
 	}
-	fmt.Printf("status=%s  version=%s\n\n", health.Status, health.Version)
+	slog.Info("connected", "server", health.Version)
 
-	// ── 2. Write ─────────────────────────────────────────────────────────────
-	fmt.Println("=== Write ===")
-	now := time.Now().UnixNano()
-	writeResp, err := c.Write(ctx, &pb.WriteRequest{
-		Series: []*pb.Series{
-			{
-				Metric: "cpu_usage",
-				Labels: map[string]string{"host": "test-1", "env": "dev"},
-				Points: []*pb.DataPoint{
-					{Timestamp: now - 4*int64(time.Second), Value: 12.5},
-					{Timestamp: now - 3*int64(time.Second), Value: 34.7},
-					{Timestamp: now - 2*int64(time.Second), Value: 56.1},
-					{Timestamp: now - 1*int64(time.Second), Value: 78.9},
-					{Timestamp: now, Value: 90.0},
-				},
-			},
-			{
-				Metric: "mem_usage",
-				Labels: map[string]string{"host": "test-1"},
-				Points: []*pb.DataPoint{
-					{Timestamp: now - 2*int64(time.Second), Value: 1024.0},
-					{Timestamp: now - 1*int64(time.Second), Value: 2048.0},
-					{Timestamp: now, Value: 3072.0},
-				},
-			},
-		},
-	})
-	if err != nil {
-		log.Fatalf("write: %v", err)
-	}
-	fmt.Printf("written=%d series\n\n", writeResp.Written)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	// ── 3. Query — весь диапазон ──────────────────────────────────────────────
-	fmt.Println("=== Query (full range) ===")
-	queryResp, err := c.Query(ctx, &pb.QueryRequest{
-		Metric: "cpu_usage",
-		Labels: map[string]string{"host": "test-1"},
-		From:   0,
-		To:     0,
-	})
-	if err != nil {
-		log.Fatalf("query: %v", err)
-	}
-	for _, s := range queryResp.Series {
-		fmt.Printf("metric=%s labels=%v  points=%d\n", s.Metric, s.Labels, len(s.Points))
-		for _, p := range s.Points {
-			fmt.Printf("  ts=%d  val=%.2f\n", p.Timestamp, p.Value)
-		}
-	}
-	fmt.Println()
-
-	// ── 4. Query — узкий диапазон ─────────────────────────────────────────────
-	fmt.Println("=== Query (last 2s) ===")
-	queryResp2, err := c.Query(ctx, &pb.QueryRequest{
-		Metric: "cpu_usage",
-		Labels: map[string]string{"host": "test-1"},
-		From:   now - 2*int64(time.Second),
-		To:     now,
-	})
-	if err != nil {
-		log.Fatalf("query range: %v", err)
-	}
-	for _, s := range queryResp2.Series {
-		fmt.Printf("metric=%s  points=%d\n", s.Metric, len(s.Points))
-	}
-	fmt.Println()
-
-	// ── 5. Subscribe — получить 3 точки в реальном времени ───────────────────
-	fmt.Println("=== Subscribe (waiting for 3 live points, writing 5 in background) ===")
-	subCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	stream, err := c.Subscribe(subCtx, &pb.SubscribeRequest{
-		Metric: "live_metric",
-		Labels: map[string]string{"src": "grpc_test"},
-	})
-	if err != nil {
-		log.Fatalf("subscribe: %v", err)
+	n := clampInt(*nstation, 1, len(defaultStations))
+	stations := make([]*station, n)
+	for i := 0; i < n; i++ {
+		def := defaultStations[i]
+		stations[i] = newStation(def.city, def.country, def.lat, rng)
 	}
 
-	// Пишем 5 точек с задержкой 200ms
+	slog.Info("weather generator started",
+		"stations", n,
+		"cities", stationNames(stations),
+		"rate", fmt.Sprintf("%d ticks/s", *rate),
+	)
+	fmt.Println("Controls: [+] double rate  [-] halve rate  [q] quit")
+
+	var currentRate atomic.Int64
+	currentRate.Store(int64(*rate))
+
 	go func() {
-		time.Sleep(200 * time.Millisecond)
-		for i := 0; i < 5; i++ {
-			_, werr := c.Write(context.Background(), &pb.WriteRequest{
-				Series: []*pb.Series{{
-					Metric: "live_metric",
-					Labels: map[string]string{"src": "grpc_test"},
-					Points: []*pb.DataPoint{
-						{Timestamp: time.Now().UnixNano(), Value: float64(i) * 1.5},
-					},
-				}},
-			})
-			if werr != nil {
-				log.Printf("live write %d error: %v", i, werr)
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			switch scanner.Text() {
+			case "+":
+				r := currentRate.Load() * 2
+				currentRate.Store(r)
+				fmt.Printf("→ rate: %d ticks/s\n", r)
+			case "-":
+				r := currentRate.Load() / 2
+				if r < 1 { r = 1 }
+				currentRate.Store(r)
+				fmt.Printf("→ rate: %d ticks/s\n", r)
+			case "q":
+				os.Exit(0)
 			}
-			time.Sleep(200 * time.Millisecond)
 		}
 	}()
 
-	received := 0
-	for received < 3 {
-		pt, serr := stream.Recv()
-		if serr == io.EOF {
-			break
+	var totalWritten, totalErrors atomic.Int64
+
+	go func() {
+		prev := int64(0)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			cur := totalWritten.Load()
+			slog.Info("stats",
+				"series/s", fmt.Sprintf("%.1f", float64(cur-prev)/10.0),
+				"total", cur,
+				"errors", totalErrors.Load(),
+			)
+			prev = cur
 		}
-		if serr != nil {
-			log.Printf("subscribe recv: %v", serr)
-			break
+	}()
+
+	lastRate := int64(0)
+	var ticker *time.Ticker
+
+	for {
+		r := currentRate.Load()
+		if r != lastRate {
+			if ticker != nil { ticker.Stop() }
+			ticker = time.NewTicker(time.Duration(float64(time.Second) / float64(r)))
+			lastRate = r
 		}
-		fmt.Printf("  live point: ts=%d  val=%.2f\n", pt.Timestamp, pt.Value)
-		received++
-	}
-	fmt.Printf("received %d live points\n\n", received)
 
-	// ── 6. Delete ─────────────────────────────────────────────────────────────
-	fmt.Println("=== Delete (first 2 points of cpu_usage) ===")
-	_, err = c.Delete(ctx, &pb.DeleteRequest{
-		Metric: "cpu_usage",
-		Labels: map[string]string{"host": "test-1"},
-		From:   now - 4*int64(time.Second),
-		To:     now - 3*int64(time.Second),
-	})
-	if err != nil {
-		log.Fatalf("delete: %v", err)
-	}
-	fmt.Println("delete OK")
+		<-ticker.C
+		t := float64(time.Now().UnixNano()) / float64(time.Second)
 
-	// Проверяем, что осталось 3 точки
-	afterDel, err := c.Query(ctx, &pb.QueryRequest{
-		Metric: "cpu_usage",
-		Labels: map[string]string{"host": "test-1"},
-		From:   0,
-		To:     0,
-	})
-	if err != nil {
-		log.Fatalf("query after delete: %v", err)
+		for _, s := range stations {
+			series := s.tick(rng, t)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_, err := c.Write(ctx, &pb.WriteRequest{Series: series})
+			cancel()
+			if err != nil {
+				totalErrors.Add(1)
+			} else {
+				totalWritten.Add(int64(len(series)))
+			}
+		}
 	}
-	for _, s := range afterDel.Series {
-		fmt.Printf("after delete: points=%d (expected 3)\n", len(s.Points))
-	}
+}
 
-	fmt.Println("\n=== All checks passed ===")
+func stationNames(stations []*station) []string {
+	names := make([]string, len(stations))
+	for i, s := range stations {
+		names[i] = s.city
+	}
+	return names
+}
+
+func clampInt(v, min, max int) int {
+	if v < min { return min }
+	if v > max { return max }
+	return v
 }

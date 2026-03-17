@@ -17,10 +17,15 @@ type rawConfig struct {
 	FlushInterval string     `yaml:"flush_interval"`
 	Mode          ServerMode `yaml:"mode"`
 	GRPCAddr      string     `yaml:"grpc_addr"`
+	HTTPAddr      string     `yaml:"http_addr"`
 	Auth          struct {
 		Enabled bool     `yaml:"enabled"`
 		APIKeys []string `yaml:"api_keys"`
 	} `yaml:"auth"`
+	Collector struct {
+		Enabled  bool   `yaml:"enabled"`
+		Interval string `yaml:"interval"`
+	} `yaml:"collector"`
 }
 
 // LoadConfig читает YAML файл и возвращает Config.
@@ -47,6 +52,9 @@ func LoadConfig(path string) (Config, error) {
 	if raw.GRPCAddr != "" {
 		cfg.GRPCAddr = raw.GRPCAddr
 	}
+	if raw.HTTPAddr != "" {
+		cfg.HTTPAddr = raw.HTTPAddr
+	}
 	if raw.Retention != "" {
 		d, err := time.ParseDuration(raw.Retention)
 		if err != nil {
@@ -65,6 +73,14 @@ func LoadConfig(path string) (Config, error) {
 		Enabled: raw.Auth.Enabled,
 		APIKeys: raw.Auth.APIKeys,
 	}
+	cfg.Collector.Enabled = raw.Collector.Enabled
+	if raw.Collector.Interval != "" {
+		d, err := time.ParseDuration(raw.Collector.Interval)
+		if err != nil {
+			return Config{}, fmt.Errorf("collector.interval %q: %w", raw.Collector.Interval, err)
+		}
+		cfg.Collector.Interval = d
+	}
 
 	return cfg, nil
 }
@@ -75,7 +91,12 @@ func DefaultConfig() Config {
 		WALPath:       defaultWALPath(),
 		Mode:          ModeSelfHosted,
 		GRPCAddr:      ":50051",
+		HTTPAddr:      ":8080",
 		FlushInterval: 100 * time.Millisecond,
+		Collector: CollectorConfig{
+			Enabled:  true,
+			Interval: 15 * time.Second,
+		},
 	}
 }
 

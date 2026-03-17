@@ -47,6 +47,10 @@ type DB struct {
 	subsMu sync.RWMutex
 	subs   map[uint64]*subscription
 	subSeq atomic.Uint64
+
+	watchersMu sync.RWMutex
+	watchers   map[uint64]chan struct{}
+	watcherSeq atomic.Uint64
 }
 
 // Open открывает (или создаёт) БД согласно конфигу.
@@ -77,6 +81,7 @@ func Open(cfg Config) (*DB, error) {
 		closeCh:   make(chan struct{}),
 		walDone:   make(chan struct{}),
 		subs:      make(map[uint64]*subscription),
+		watchers:  make(map[uint64]chan struct{}),
 	}
 	for i := range db.shards {
 		db.shards[i].series = make(map[seriesID]*series)
@@ -186,6 +191,7 @@ func (db *DB) writeBatch(metric string, labels map[string]string, points []Point
 
 	// Уведомляем подписчиков
 	db.notify(metric, labelsCopy, pointsCopy)
+	db.broadcastWatchers()
 
 	return nil
 }
@@ -285,6 +291,43 @@ func (db *DB) notify(metric string, labels map[string]string, points []Point) {
 			case sub.ch <- p:
 			default: // дроп если подписчик медленный
 			}
+		}
+	}
+}
+
+// Metrics возвращает список всех метрик хранящихся в БД.
+func (db *DB) Metrics() []string {
+	return db.metricIdx.list()
+}
+
+// Watch возвращает канал, который получает сигнал при каждом Write.
+// Канал буферизован на 1 — множественные быстрые записи сливаются в один сигнал.
+func (db *DB) Watch() (uint64, <-chan struct{}) {
+	ch := make(chan struct{}, 1)
+	id := db.watcherSeq.Add(1)
+	db.watchersMu.Lock()
+	db.watchers[id] = ch
+	db.watchersMu.Unlock()
+	return id, ch
+}
+
+// Unwatch отменяет подписку на Write-события.
+func (db *DB) Unwatch(id uint64) {
+	db.watchersMu.Lock()
+	if ch, ok := db.watchers[id]; ok {
+		delete(db.watchers, id)
+		close(ch)
+	}
+	db.watchersMu.Unlock()
+}
+
+func (db *DB) broadcastWatchers() {
+	db.watchersMu.RLock()
+	defer db.watchersMu.RUnlock()
+	for _, ch := range db.watchers {
+		select {
+		case ch <- struct{}{}:
+		default:
 		}
 	}
 }

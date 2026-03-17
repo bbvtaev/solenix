@@ -7,6 +7,9 @@ mode: self-hosted
 # gRPC адрес сервера
 grpc_addr: ":50051"
 
+# HTTP адрес UI и REST API (self-hosted, открой localhost:8080)
+http_addr: ":8080"
+
 # Путь к WAL файлу (данные на диске)
 wal_path: "./data/metrics.wal"
 
@@ -21,6 +24,11 @@ flush_interval: "100ms"
 auth:
   enabled: false
   api_keys: []
+
+# Встроенный сбор системных метрик хоста
+collector:
+  enabled: true
+  interval: "15s"
   # api_keys:
   #   - "pk_live_abc123"
   #   - "pk_live_xyz789"

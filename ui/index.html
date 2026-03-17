@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pulse — Metrics Explorer</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f1117;
+      --surface:  #1a1d27;
+      --border:   #2a2d3a;
+      --accent:   #6c8ef5;
+      --accent2:  #4ade80;
+      --text:     #e2e8f0;
+      --muted:    #64748b;
+      --danger:   #f87171;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 20px;
+      height: 52px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      flex-shrink: 0;
+    }
+    header .logo { font-size: 18px; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; }
+    header .sep  { color: var(--border); }
+    header .info { font-size: 12px; color: var(--muted); }
+    header .badge {
+      margin-left: auto;
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--muted);
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent2); animation: pulse-dot 2s infinite; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    /* ── Layout ── */
+    .layout {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ── */
+    aside {
+      width: 240px;
+      flex-shrink: 0;
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      background: var(--surface);
+    }
+    .sidebar-header {
+      padding: 14px 16px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .metric-count {
+      background: var(--border);
+      padding: 1px 7px;
+      border-radius: 10px;
+      font-size: 11px;
+      color: var(--text);
+    }
+    .metric-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px 0;
+    }
+    .metric-list::-webkit-scrollbar { width: 4px; }
+    .metric-list::-webkit-scrollbar-track { background: transparent; }
+    .metric-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .metric-item {
+      padding: 8px 16px;
+      font-size: 13px;
+      cursor: pointer;
+      border-left: 2px solid transparent;
+      transition: all .15s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--muted);
+    }
+    .metric-item:hover { background: rgba(108,142,245,.08); color: var(--text); }
+    .metric-item.active {
+      border-left-color: var(--accent);
+      background: rgba(108,142,245,.12);
+      color: var(--accent);
+      font-weight: 500;
+    }
+    .empty-state {
+      padding: 24px 16px;
+      font-size: 13px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    /* ── Main ── */
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .placeholder {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      color: var(--muted);
+    }
+    .placeholder svg { opacity: .3; }
+    .placeholder p { font-size: 14px; }
+
+    /* ── Metric view ── */
+    .metric-view {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .metric-toolbar {
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .metric-name {
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .toolbar-stats {
+      display: flex;
+      gap: 16px;
+      margin-left: auto;
+    }
+    .stat {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .stat span { color: var(--text); font-weight: 500; }
+
+    .metric-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .metric-body::-webkit-scrollbar { width: 4px; }
+    .metric-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    /* ── Chart card ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 12px 16px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      border-bottom: 1px solid var(--border);
+    }
+    .chart-wrap {
+      padding: 16px;
+      height: 220px;
+      position: relative;
+    }
+
+    /* ── Series table ── */
+    .series-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .series-row {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 13px;
+    }
+    .series-labels {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      flex: 1;
+    }
+    .label-tag {
+      background: rgba(108,142,245,.12);
+      border: 1px solid rgba(108,142,245,.2);
+      color: var(--accent);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-family: monospace;
+    }
+    .series-meta {
+      display: flex;
+      gap: 20px;
+      flex-shrink: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .series-meta span { color: var(--text); font-weight: 500; }
+
+    /* ── Loader ── */
+    .loader {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    /* ── Refresh indicator ── */
+    .refresh-bar {
+      height: 2px;
+      background: var(--accent);
+      width: 0%;
+      transition: width linear;
+      position: fixed;
+      top: 52px;
+      left: 0;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="logo">⚡ Pulse</span>
+  <span class="sep">|</span>
+  <span class="info" id="version">loading...</span>
+  <div class="badge">
+    <div class="dot"></div>
+    <span id="refresh-label">refreshing every 5s</span>
+  </div>
+</header>
+
+<div class="refresh-bar" id="refresh-bar"></div>
+
+<div class="layout">
+  <aside>
+    <div class="sidebar-header">
+      Metrics
+      <span class="metric-count" id="metric-count">0</span>
+    </div>
+    <div class="metric-list" id="metric-list">
+      <div class="empty-state">Loading...</div>
+    </div>
+  </aside>
+
+  <main id="main">
+    <div class="placeholder">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+      </svg>
+      <p>Select a metric to explore</p>
+    </div>
+  </main>
+</div>
+
+<script>
+  const REFRESH_MS = 5000;
+  let selectedMetric = null;
+  let chart = null;
+  let refreshTimer = null;
+
+
+  async function fetchMetrics() {
+    const r = await fetch('/api/metrics');
+    return r.json();
+  }
+
+  async function fetchSeries(metric, from = 0, to = 0) {
+    const r = await fetch(`/api/query?metric=${encodeURIComponent(metric)}&from=${from}&to=${to}`);
+    return r.json();
+  }
+
+  async function fetchHealth() {
+    const r = await fetch('/api/health');
+    return r.json(); 
+  }
+
+  async function refreshSidebar() {
+    const data = await fetchMetrics();
+    const metrics = (data.metrics || []).sort();
+    document.getElementById('metric-count').textContent = metrics.length;
+
+    const list = document.getElementById('metric-list');
+    list.innerHTML = '';
+
+    if (metrics.length === 0) {
+      list.innerHTML = '<div class="empty-state">No metrics yet</div>';
+      return;
+    }
+
+    metrics.forEach(m => {
+      const el = document.createElement('div');
+      el.className = 'metric-item' + (m === selectedMetric ? ' active' : '');
+      el.textContent = m;
+      el.title = m;
+      el.onclick = () => selectMetric(m);
+      list.appendChild(el);
+    });
+  }
+
+  async function selectMetric(metric) {
+    selectedMetric = metric;
+    refreshSidebar();
+    renderLoader();
+    await refreshMetricView();
+  }
+
+  function renderLoader() {
+    document.getElementById('main').innerHTML = '<div class="loader">Loading...</div>';
+  }
+
+  async function refreshMetricView() {
+    if (!selectedMetric) return;
+    const data = await fetchSeries(selectedMetric);
+    const series = data.series || [];
+    renderMetricView(selectedMetric, series);
+  }
+
+  function renderMetricView(metric, series) {
+    const totalPoints = series.reduce((s, r) => s + r.points.length, 0);
+    const allPoints = series.flatMap(r => r.points);
+    const latest = allPoints.length ? allPoints[allPoints.length - 1] : null;
+
+    const main = document.getElementById('main');
+    main.innerHTML = `
+      <div class="metric-view">
+        <div class="metric-toolbar">
+          <div class="metric-name">${metric}</div>
+          <div class="toolbar-stats">
+            <div class="stat">Series: <span>${series.length}</span></div>
+            <div class="stat">Points: <span>${totalPoints}</span></div>
+            ${latest ? `<div class="stat">Latest: <span>${latest.value.toFixed(4)}</span></div>` : ''}
+          </div>
+        </div>
+        <div class="metric-body">
+          ${series.length > 0 ? renderChart(series) : ''}
+          <div class="series-grid" id="series-grid"></div>
+        </div>
+      </div>
+    `;
+
+    renderSeriesRows(series);
+
+    if (series.length > 0) {
+      buildChart(series);
+    }
+  }
+
+  function renderChart(series) {
+    return `
+      <div class="card">
+        <div class="card-header">Chart — all series</div>
+        <div class="chart-wrap">
+          <canvas id="metric-chart"></canvas>
+        </div>
+      </div>
+    `;
+  }
+
+  const COLORS = ['#6c8ef5','#4ade80','#fb923c','#f472b6','#a78bfa','#34d399','#fbbf24','#60a5fa'];
+
+  function buildChart(series) {
+    if (chart) { chart.destroy(); chart = null; }
+
+    const datasets = series.map((s, i) => {
+      const sorted = [...s.points].sort((a, b) => a.timestamp - b.timestamp);
+      const last200 = sorted.slice(-200);
+      return {
+        label: labelsToString(s.labels) || s.metric,
+        data: last200.map(p => ({ x: p.timestamp / 1e6, y: p.value })),
+        borderColor: COLORS[i % COLORS.length],
+        backgroundColor: COLORS[i % COLORS.length] + '20',
+        borderWidth: 1.5,
+        pointRadius: last200.length > 50 ? 0 : 3,
+        tension: 0.3,
+        fill: false,
+      };
+    });
+
+    const ctx = document.getElementById('metric-chart');
+    if (!ctx) return;
+
+    chart = new Chart(ctx, {
+      type: 'line',
+      data: { datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { labels: { color: '#94a3b8', font: { size: 11 }, boxWidth: 12 } },
+          tooltip: {
+            backgroundColor: '#1a1d27',
+            borderColor: '#2a2d3a',
+            borderWidth: 1,
+            titleColor: '#e2e8f0',
+            bodyColor: '#94a3b8',
+            callbacks: {
+              title: items => new Date(items[0].parsed.x).toLocaleTimeString(),
+              label: item => ` ${item.dataset.label}: ${item.parsed.y.toFixed(4)}`,
+            }
+          }
+        },
+        scales: {
+          x: {
+            type: 'linear',
+            ticks: { color: '#64748b', font: { size: 10 },
+              callback: v => new Date(v).toLocaleTimeString() },
+            grid: { color: '#2a2d3a' },
+          },
+          y: {
+            ticks: { color: '#64748b', font: { size: 10 } },
+            grid: { color: '#2a2d3a' },
+          }
+        }
+      }
+    });
+  }
+
+  function renderSeriesRows(series) {
+    const grid = document.getElementById('series-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    series.forEach(s => {
+      const pts = s.points;
+      const last = pts.length ? pts[pts.length - 1] : null;
+      const first = pts.length ? pts[0] : null;
+      const row = document.createElement('div');
+      row.className = 'series-row';
+      row.innerHTML = `
+        <div class="series-labels">
+          ${Object.entries(s.labels || {}).map(([k,v]) =>
+            `<span class="label-tag">${k}="${v}"</span>`).join('') || '<span style="color:var(--muted);font-size:12px">no labels</span>'}
+        </div>
+        <div class="series-meta">
+          <div>${pts.length} pts</div>
+          ${last ? `<div>latest: <span>${last.value.toFixed(4)}</span></div>` : ''}
+          ${first && last && first !== last ? `<div>from <span>${new Date(first.timestamp/1e6).toLocaleTimeString()}</span></div>` : ''}
+        </div>
+      `;
+      grid.appendChild(row);
+    });
+  }
+
+  function labelsToString(labels) {
+    return Object.entries(labels || {}).map(([k,v]) => `${k}=${v}`).join(' ');
+  }
+
+  function animateRefreshBar() {
+    const bar = document.getElementById('refresh-bar');
+    bar.style.transition = 'none';
+    bar.style.width = '0%';
+    requestAnimationFrame(() => {
+      bar.style.transition = `width ${REFRESH_MS}ms linear`;
+      bar.style.width = '100%';
+    });
+  }
+
+  async function refresh() {
+    await refreshSidebar();
+    await refreshMetricView();
+    animateRefreshBar();
+  }
+
+  async function init() {
+    try {
+      const h = await fetchHealth();
+      document.getElementById('version').textContent =
+        `pulse-core ${h.version} · ${h.status}`;
+    } catch { document.getElementById('version').textContent = 'pulse-core'; }
+
+    await refresh();
+    setInterval(refresh, REFRESH_MS);
+  }
+
+  init();
+</script>
+</body>
+</html>

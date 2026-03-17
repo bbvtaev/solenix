@@ -66,7 +66,16 @@ type Config struct {
 	// Server
 	Mode     ServerMode `yaml:"mode"`
 	GRPCAddr string     `yaml:"grpc_addr"`
+	HTTPAddr string     `yaml:"http_addr"` // UI + REST API, только в self-hosted
 
 	// Auth
 	Auth AuthConfig `yaml:"auth"`
+
+	// Collector — встроенный сбор системных метрик хоста.
+	Collector CollectorConfig `yaml:"collector"`
+}
+
+type CollectorConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	Interval time.Duration `yaml:"interval"` // как часто собирать, default 15s
 }

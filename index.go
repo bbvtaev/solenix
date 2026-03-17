@@ -35,6 +35,16 @@ func (mi *metricIndex) remove(metric string, id seriesID) {
 	}
 }
 
+func (mi *metricIndex) list() []string {
+	mi.mu.RLock()
+	defer mi.mu.RUnlock()
+	names := make([]string, 0, len(mi.idx))
+	for name := range mi.idx {
+		names = append(names, name)
+	}
+	return names
+}
+
 func (mi *metricIndex) lookup(metric string) []seriesID {
 	mi.mu.RLock()
 	defer mi.mu.RUnlock()
