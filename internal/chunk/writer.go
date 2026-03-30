@@ -14,9 +14,11 @@ import (
 	"github.com/bbvtaev/pulse-core/internal/model"
 )
 
+const versionGorilla byte = 0x02
+
 const (
 	Magic      uint32 = 0x50554C53 // "PULS"
-	version    byte   = 0x01
+	version    byte   = versionGorilla
 	headerSize        = 24 // magic(4) + version(1) + reserved(3) + min_ts(8) + max_ts(8)
 	footerSize        = 8  // series_count(4) + checksum(4)
 )
@@ -75,9 +77,11 @@ func (cw *Writer) Write(metric string, series []*model.SeriesResult) error {
 			if p.Timestamp > maxTS {
 				maxTS = p.Timestamp
 			}
-			body = binary.LittleEndian.AppendUint64(body, uint64(p.Timestamp))
-			body = binary.LittleEndian.AppendUint64(body, math.Float64bits(p.Value))
 		}
+
+		compressed := EncodePoints(ser.Points)
+		body = binary.LittleEndian.AppendUint32(body, uint32(len(compressed)))
+		body = append(body, compressed...)
 	}
 
 	// Заголовок: magic(4)+version(1)+reserved(3)+min_ts(8)+max_ts(8) = 24 bytes

@@ -14,6 +14,8 @@ import (
 	"github.com/bbvtaev/pulse-core/internal/model"
 )
 
+const versionRaw byte = 0x01
+
 type reader struct{}
 
 // ReadAllChunks читает все *.chunk файлы из data/chunks/*/
@@ -78,6 +80,8 @@ func (cr reader) readFile(path string) ([]model.Record, error) {
 		return nil, fmt.Errorf("invalid chunk magic in %s: got %08x", path, magic)
 	}
 
+	ver := data[4]
+
 	footerOffset := len(data) - footerSize
 	footer := data[footerOffset:]
 	seriesCount := int(binary.LittleEndian.Uint32(footer[0:4]))
@@ -121,16 +125,36 @@ func (cr reader) readFile(path string) ([]model.Record, error) {
 		pointsCount := int(binary.LittleEndian.Uint32(data[offset:]))
 		offset += 4
 
-		if offset+pointsCount*16 > footerOffset {
-			return nil, fmt.Errorf("unexpected EOF reading points in %s (series %d)", path, i)
-		}
-		points := make([]model.Point, pointsCount)
-		for j := 0; j < pointsCount; j++ {
-			ts := int64(binary.LittleEndian.Uint64(data[offset:]))
-			offset += 8
-			val := math.Float64frombits(binary.LittleEndian.Uint64(data[offset:]))
-			offset += 8
-			points[j] = model.Point{Timestamp: ts, Value: val}
+		var points []model.Point
+		switch ver {
+		case versionRaw:
+			if offset+pointsCount*16 > footerOffset {
+				return nil, fmt.Errorf("unexpected EOF reading points in %s (series %d)", path, i)
+			}
+			points = make([]model.Point, pointsCount)
+			for j := 0; j < pointsCount; j++ {
+				ts := int64(binary.LittleEndian.Uint64(data[offset:]))
+				offset += 8
+				val := math.Float64frombits(binary.LittleEndian.Uint64(data[offset:]))
+				offset += 8
+				points[j] = model.Point{Timestamp: ts, Value: val}
+			}
+		case versionGorilla:
+			if offset+4 > footerOffset {
+				return nil, fmt.Errorf("unexpected EOF reading compressed_len in %s (series %d)", path, i)
+			}
+			compressedLen := int(binary.LittleEndian.Uint32(data[offset:]))
+			offset += 4
+			if offset+compressedLen > footerOffset {
+				return nil, fmt.Errorf("unexpected EOF reading gorilla data in %s (series %d)", path, i)
+			}
+			points, err = DecodePoints(data[offset:offset+compressedLen], pointsCount)
+			if err != nil {
+				return nil, fmt.Errorf("decode gorilla points in %s (series %d): %w", path, i, err)
+			}
+			offset += compressedLen
+		default:
+			return nil, fmt.Errorf("unknown chunk version %d in %s", ver, path)
 		}
 
 		records = append(records, model.Record{
