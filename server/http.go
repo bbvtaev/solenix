@@ -39,8 +39,7 @@ func (h *HTTPServer) ListenHTTP(addr string) error {
 	// API
 	mux.HandleFunc("/api/metrics", h.handleMetrics)
 	mux.HandleFunc("/api/query", h.handleQuery)
-	mux.HandleFunc("/api/snapshot", h.handleSnapshot)
-	mux.HandleFunc("/api/stream", h.handleStream)
+	mux.HandleFunc("/api/latest", h.handleLatest)
 	mux.HandleFunc("/api/health", h.handleHealth)
 
 	return http.ListenAndServe(addr, mux)
@@ -71,78 +70,39 @@ func (h *HTTPServer) handleQuery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"series": results})
 }
 
-// handleSnapshot возвращает все метрики со всеми сериями (последние 200 точек на серию).
-func (h *HTTPServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
-	type snapshotSeries struct {
-		Labels      map[string]string `json:"labels"`
-		Points      []pulse.Point     `json:"points"`
-		TotalPoints int               `json:"total_points"`
-	}
-	type snapshotMetric struct {
-		Metric string           `json:"metric"`
-		Series []snapshotSeries `json:"series"`
+// handleLatest возвращает последнюю точку каждой серии по всем метрикам.
+func (h *HTTPServer) handleLatest(w http.ResponseWriter, r *http.Request) {
+	type row struct {
+		Metric    string            `json:"metric"`
+		Labels    map[string]string `json:"labels"`
+		Value     float64           `json:"value"`
+		Timestamp int64             `json:"timestamp"`
 	}
 
 	names := h.db.Metrics()
 	sort.Strings(names)
 
-	result := make([]snapshotMetric, 0, len(names))
+	rows := make([]row, 0)
 	for _, name := range names {
 		series, err := h.db.Query(name, nil, 0, 0)
 		if err != nil {
 			continue
 		}
-		sm := snapshotMetric{Metric: name}
 		for _, s := range series {
-			pts := s.Points
-			total := len(pts)
-			if len(pts) > 200 {
-				pts = pts[len(pts)-200:]
+			if len(s.Points) == 0 {
+				continue
 			}
-			sm.Series = append(sm.Series, snapshotSeries{
-				Labels:      s.Labels,
-				Points:      pts,
-				TotalPoints: total,
+			last := s.Points[len(s.Points)-1]
+			rows = append(rows, row{
+				Metric:    name,
+				Labels:    s.Labels,
+				Value:     last.Value,
+				Timestamp: last.Timestamp,
 			})
 		}
-		result = append(result, sm)
 	}
 
-	writeJSON(w, map[string]any{"metrics": result})
-}
-
-// handleStream — SSE эндпоинт. Отправляет "tick" при каждом новом Write в БД.
-func (h *HTTPServer) handleStream(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	id, ch := h.db.Watch()
-	defer h.db.Unwatch(id)
-
-	// Начальный ping — клиент сразу делает первый fetch
-	fmt.Fprintf(w, "data: tick\n\n")
-	flusher.Flush()
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case _, ok := <-ch:
-			if !ok {
-				return
-			}
-			fmt.Fprintf(w, "data: tick\n\n")
-			flusher.Flush()
-		}
-	}
+	writeJSON(w, map[string]any{"rows": rows})
 }
 
 func (h *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {

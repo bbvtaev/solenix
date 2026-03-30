@@ -1,15 +1,17 @@
-package pulse
+package storage
 
 import (
 	"errors"
 	"math"
 	"sort"
 	"time"
+
+	"github.com/bbvtaev/pulse-core/internal/model"
 )
 
 // Query возвращает все серии по метрике и лейблам в диапазоне [from, to].
 // from и to — Unix nanoseconds. 0 означает отсутствие ограничения.
-func (db *DB) Query(metric string, labels map[string]string, from, to int64) ([]SeriesResult, error) {
+func (db *DB) Query(metric string, labels map[string]string, from, to int64) ([]model.SeriesResult, error) {
 	if metric == "" {
 		return nil, errors.New("metric is required")
 	}
@@ -19,7 +21,7 @@ func (db *DB) Query(metric string, labels map[string]string, from, to int64) ([]
 		return nil, nil
 	}
 
-	var res []SeriesResult
+	var res []model.SeriesResult
 	for _, id := range ids {
 		sh := db.shardFor(id)
 		sh.mu.RLock()
@@ -40,15 +42,13 @@ func (db *DB) Query(metric string, labels map[string]string, from, to int64) ([]
 		if len(points) == 0 {
 			continue
 		}
-		res = append(res, SeriesResult{Metric: met, Labels: lbls, Points: points})
+		res = append(res, model.SeriesResult{Metric: met, Labels: lbls, Points: points})
 	}
 
 	return res, nil
 }
 
 // Delete удаляет точки в диапазоне [from, to] для всех серий, совпадающих с metric+labels.
-// from=0 означает «с самого начала», to=0 — «до конца».
-// Если from=0 и to=0 — удаляется вся серия целиком.
 func (db *DB) Delete(metric string, labels map[string]string, from, to int64) error {
 	if metric == "" {
 		return errors.New("metric is required")
@@ -81,20 +81,19 @@ func (db *DB) Delete(metric string, labels map[string]string, from, to int64) er
 }
 
 // QueryAgg возвращает агрегированные данные по временным окнам.
-// window — размер окна, agg — тип агрегации (avg/min/max/sum/count).
-func (db *DB) QueryAgg(metric string, labels map[string]string, from, to int64, window time.Duration, agg AggType) ([]AggResult, error) {
+func (db *DB) QueryAgg(metric string, labels map[string]string, from, to int64, window time.Duration, agg model.AggType) ([]model.AggResult, error) {
 	raw, err := db.Query(metric, labels, from, to)
 	if err != nil {
 		return nil, err
 	}
 
-	results := make([]AggResult, 0, len(raw))
+	results := make([]model.AggResult, 0, len(raw))
 	for _, s := range raw {
 		pts := aggregatePoints(s.Points, from, window, agg)
 		if len(pts) == 0 {
 			continue
 		}
-		results = append(results, AggResult{
+		results = append(results, model.AggResult{
 			Metric: s.Metric,
 			Labels: s.Labels,
 			Window: window,
@@ -105,7 +104,7 @@ func (db *DB) QueryAgg(metric string, labels map[string]string, from, to int64, 
 	return results, nil
 }
 
-func filterPoints(points []Point, from, to int64) []Point {
+func filterPoints(points []model.Point, from, to int64) []model.Point {
 	if len(points) == 0 {
 		return nil
 	}
@@ -128,13 +127,12 @@ func filterPoints(points []Point, from, to int64) []Point {
 		return nil
 	}
 
-	out := make([]Point, end-start)
+	out := make([]model.Point, end-start)
 	copy(out, points[start:end])
 	return out
 }
 
-// deletePoints возвращает точки, находящиеся вне диапазона [from, to].
-func deletePoints(points []Point, from, to int64) []Point {
+func deletePoints(points []model.Point, from, to int64) []model.Point {
 	if len(points) == 0 {
 		return nil
 	}
@@ -152,12 +150,12 @@ func deletePoints(points []Point, from, to int64) []Point {
 	if len(out) == 0 {
 		return nil
 	}
-	result := make([]Point, len(out))
+	result := make([]model.Point, len(out))
 	copy(result, out)
 	return result
 }
 
-func aggregatePoints(points []Point, from int64, window time.Duration, agg AggType) []AggPoint {
+func aggregatePoints(points []model.Point, from int64, window time.Duration, agg model.AggType) []model.AggPoint {
 	if len(points) == 0 || window <= 0 {
 		return nil
 	}
@@ -167,16 +165,14 @@ func aggregatePoints(points []Point, from int64, window time.Duration, agg AggTy
 	if base == 0 {
 		base = points[0].Timestamp
 	}
-	// Выравниваем начало на границу окна
 	bucketStart := (base / winNs) * winNs
 
 	last := points[len(points)-1].Timestamp
-	var result []AggPoint
+	var result []model.AggPoint
 
 	for bucketStart <= last {
 		bucketEnd := bucketStart + winNs
 
-		// Бинарный поиск границ окна для O(log n)
 		lo := sort.Search(len(points), func(i int) bool { return points[i].Timestamp >= bucketStart })
 		hi := sort.Search(len(points), func(i int) bool { return points[i].Timestamp >= bucketEnd })
 
@@ -185,7 +181,7 @@ func aggregatePoints(points []Point, from int64, window time.Duration, agg AggTy
 			for i, p := range points[lo:hi] {
 				vals[i] = p.Value
 			}
-			result = append(result, AggPoint{
+			result = append(result, model.AggPoint{
 				Timestamp: bucketStart,
 				Value:     applyAgg(vals, agg),
 			})
@@ -196,15 +192,15 @@ func aggregatePoints(points []Point, from int64, window time.Duration, agg AggTy
 	return result
 }
 
-func applyAgg(vals []float64, agg AggType) float64 {
+func applyAgg(vals []float64, agg model.AggType) float64 {
 	switch agg {
-	case AggAvg:
+	case model.AggAvg:
 		sum := 0.0
 		for _, v := range vals {
 			sum += v
 		}
 		return sum / float64(len(vals))
-	case AggMin:
+	case model.AggMin:
 		m := math.MaxFloat64
 		for _, v := range vals {
 			if v < m {
@@ -212,7 +208,7 @@ func applyAgg(vals []float64, agg AggType) float64 {
 			}
 		}
 		return m
-	case AggMax:
+	case model.AggMax:
 		m := -math.MaxFloat64
 		for _, v := range vals {
 			if v > m {
@@ -220,13 +216,13 @@ func applyAgg(vals []float64, agg AggType) float64 {
 			}
 		}
 		return m
-	case AggSum:
+	case model.AggSum:
 		sum := 0.0
 		for _, v := range vals {
 			sum += v
 		}
 		return sum
-	case AggCount:
+	case model.AggCount:
 		return float64(len(vals))
 	default:
 		return 0

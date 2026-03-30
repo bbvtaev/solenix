@@ -45,7 +45,7 @@ func main() {
 
 	slog.Info("pulse-core started",
 		"mode", cfg.Mode,
-		"wal", cfg.WALPath,
+		"data_dir", cfg.DataDir,
 		"grpc_addr", cfg.GRPCAddr,
 		"retention", cfg.RetentionDuration,
 		"auth", cfg.Auth.Enabled,

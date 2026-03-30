@@ -2,7 +2,6 @@ package pulse_test
 
 import (
 	"math/rand"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,7 +10,7 @@ import (
 
 func newTestDB(t *testing.T) *pulse.DB {
 	t.Helper()
-	db, err := pulse.Open(pulse.Config{WALPath: filepath.Join(t.TempDir(), "tsdb.wal")})
+	db, err := pulse.Open(pulse.Config{DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -103,9 +102,8 @@ func TestTimeRangeFiltering(t *testing.T) {
 
 func TestWALReplay(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "tsdb.wal")
 
-	db, err := pulse.Open(pulse.Config{WALPath: path})
+	db, err := pulse.Open(pulse.Config{DataDir: dir})
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -117,7 +115,7 @@ func TestWALReplay(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	db2, err := pulse.Open(pulse.Config{WALPath: path})
+	db2, err := pulse.Open(pulse.Config{DataDir: dir})
 	if err != nil {
 		t.Fatalf("second Open() error = %v", err)
 	}
@@ -163,7 +161,7 @@ func TestDelete(t *testing.T) {
 func TestQueryAgg(t *testing.T) {
 	db := newTestDB(t)
 
-	base := time.Now().Truncate(time.Second).UnixNano()
+	base := time.Now().Truncate(time.Minute).UnixNano()
 	points := []pulse.Point{
 		{Timestamp: base, Value: 10},
 		{Timestamp: base + int64(10*time.Second), Value: 20},
@@ -212,7 +210,7 @@ func TestSubscribe(t *testing.T) {
 
 func newBenchDB(b *testing.B) *pulse.DB {
 	b.Helper()
-	db, err := pulse.Open(pulse.Config{WALPath: filepath.Join(b.TempDir(), "tsdb.wal")})
+	db, err := pulse.Open(pulse.Config{DataDir: b.TempDir()})
 	if err != nil {
 		b.Fatalf("Open() error = %v", err)
 	}
@@ -239,7 +237,7 @@ func BenchmarkWriteThroughput(b *testing.B) {
 }
 
 func BenchmarkWrite_BottleneckAnalysis(b *testing.B) {
-	db, err := pulse.Open(pulse.Config{WALPath: filepath.Join(b.TempDir(), "bench_bottleneck.wal")})
+	db, err := pulse.Open(pulse.Config{DataDir: b.TempDir()})
 	if err != nil {
 		b.Fatalf("Open error: %v", err)
 	}
@@ -254,9 +252,8 @@ func BenchmarkWrite_BottleneckAnalysis(b *testing.B) {
 	})
 
 	b.Run("Overhead_OpenClose_PerWrite", func(b *testing.B) {
-		path := filepath.Join(b.TempDir(), "overhead.wal")
 		for i := 0; i < b.N; i++ {
-			db2, err := pulse.Open(pulse.Config{WALPath: path})
+			db2, err := pulse.Open(pulse.Config{DataDir: b.TempDir()})
 			if err != nil {
 				b.Fatalf("Open error: %v", err)
 			}
