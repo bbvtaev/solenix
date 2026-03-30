@@ -1,4 +1,5 @@
-package pulse
+// Package wal реализует Write-Ahead Log: запись, flush и replay.
+package wal
 
 import (
 	"bufio"
@@ -9,6 +10,8 @@ import (
 	"math"
 	"os"
 	"sync"
+
+	"github.com/bbvtaev/pulse-core/internal/model"
 )
 
 // Формат WAL-записи на диске:
@@ -18,12 +21,6 @@ import (
 // [metric_len: uint16] [metric bytes]
 // [labels_count: uint16] → ([key_len: uint16] [key] [val_len: uint16] [val]) * N
 // [points_count: uint16] → ([timestamp: int64] [value: float64]) * N
-
-type walRecord struct {
-	Metric string
-	Labels map[string]string
-	Points []Point
-}
 
 type wal struct {
 	mu  sync.Mutex
@@ -42,8 +39,7 @@ func openWAL(path string) (*wal, error) {
 	}, nil
 }
 
-// write записывает запись в WAL-буфер (sync под мьютексом, flush — в bgLoop).
-func (w *wal) write(rec walRecord) error {
+func (w *wal) write(rec model.Record) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -51,7 +47,7 @@ func (w *wal) write(rec walRecord) error {
 		return fmt.Errorf("WAL is closed")
 	}
 
-	payload := encodeWALRecord(rec)
+	payload := encodeRecord(rec)
 	checksum := crc32.ChecksumIEEE(payload)
 
 	var header [8]byte
@@ -93,9 +89,9 @@ func (w *wal) close() error {
 	return err
 }
 
-// replayWAL читает все записи из WAL-файла и возвращает их.
+// Replay читает все записи из WAL-файла и возвращает их.
 // Каждая запись верифицируется по CRC-32.
-func replayWAL(path string) ([]walRecord, error) {
+func Replay(path string) ([]model.Record, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -107,7 +103,7 @@ func replayWAL(path string) ([]walRecord, error) {
 
 	reader := bufio.NewReader(f)
 	header := make([]byte, 8)
-	var records []walRecord
+	var records []model.Record
 
 	for {
 		_, err := io.ReadFull(reader, header)
@@ -131,7 +127,7 @@ func replayWAL(path string) ([]walRecord, error) {
 			return nil, fmt.Errorf("WAL record CRC mismatch: expected %d, got %d", expectedCRC, actualCRC)
 		}
 
-		rec, err := decodeWALRecord(payload)
+		rec, err := decodeRecord(payload)
 		if err != nil {
 			return nil, fmt.Errorf("corrupted WAL record: %w", err)
 		}
@@ -142,7 +138,7 @@ func replayWAL(path string) ([]walRecord, error) {
 	return records, nil
 }
 
-func encodeWALRecord(rec walRecord) []byte {
+func encodeRecord(rec model.Record) []byte {
 	estimatedSize := 2 + len(rec.Metric) + 2 + len(rec.Labels)*20 + 2 + len(rec.Points)*16
 	buf := make([]byte, 0, estimatedSize)
 
@@ -166,8 +162,8 @@ func encodeWALRecord(rec walRecord) []byte {
 	return buf
 }
 
-func decodeWALRecord(data []byte) (walRecord, error) {
-	var rec walRecord
+func decodeRecord(data []byte) (model.Record, error) {
+	var rec model.Record
 	offset := 0
 	maxLen := len(data)
 
@@ -222,7 +218,7 @@ func decodeWALRecord(data []byte) (walRecord, error) {
 	pointsCount := int(binary.LittleEndian.Uint16(data[offset:]))
 	offset += 2
 
-	rec.Points = make([]Point, pointsCount)
+	rec.Points = make([]model.Point, pointsCount)
 	if !check(pointsCount * 16) {
 		return rec, io.ErrUnexpectedEOF
 	}
@@ -231,7 +227,7 @@ func decodeWALRecord(data []byte) (walRecord, error) {
 		offset += 8
 		val := math.Float64frombits(binary.LittleEndian.Uint64(data[offset:]))
 		offset += 8
-		rec.Points[i] = Point{Timestamp: ts, Value: val}
+		rec.Points[i] = model.Point{Timestamp: ts, Value: val}
 	}
 
 	return rec, nil

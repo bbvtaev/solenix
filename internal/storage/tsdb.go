@@ -1,16 +1,22 @@
-package pulse
+package storage
 
 import (
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/bbvtaev/pulse-core/internal/chunk"
+	cfg "github.com/bbvtaev/pulse-core/internal/config"
+	"github.com/bbvtaev/pulse-core/internal/model"
+	"github.com/bbvtaev/pulse-core/internal/wal"
 )
+
+const walSyncInterval = 100 * time.Millisecond
 
 const numShards = 128
 
@@ -19,7 +25,7 @@ type seriesID uint64
 type series struct {
 	metric string
 	labels map[string]string
-	points []Point
+	points []model.Point
 }
 
 type seriesShard struct {
@@ -30,16 +36,17 @@ type seriesShard struct {
 type subscription struct {
 	metric string
 	labels map[string]string
-	ch     chan Point
+	ch     chan model.Point
 }
 
+// DB — основной объект базы данных.
 type DB struct {
 	shards    [numShards]seriesShard
 	metricIdx *metricIndex
 
-	w      *wal
-	path   string
-	config Config
+	wm     *wal.Manager
+	cw     *chunk.Writer
+	config cfg.Config
 
 	closeCh chan struct{}
 	walDone chan struct{}
@@ -54,30 +61,37 @@ type DB struct {
 }
 
 // Open открывает (или создаёт) БД согласно конфигу.
-// Незаполненные поля получают значения из DefaultConfig().
-func Open(cfg Config) (*DB, error) {
-	def := DefaultConfig()
-	if cfg.WALPath == "" {
-		cfg.WALPath = def.WALPath
+func Open(config cfg.Config) (*DB, error) {
+	def := cfg.DefaultConfig()
+	if config.DataDir == "" {
+		config.DataDir = def.DataDir
 	}
-	if cfg.FlushInterval == 0 {
-		cfg.FlushInterval = def.FlushInterval
+	if config.WALMaxSize == 0 {
+		config.WALMaxSize = def.WALMaxSize
 	}
-	if cfg.Mode == "" {
-		cfg.Mode = def.Mode
+	if config.FlushInterval == 0 {
+		config.FlushInterval = def.FlushInterval
 	}
-	if cfg.GRPCAddr == "" {
-		cfg.GRPCAddr = def.GRPCAddr
+	if config.Mode == "" {
+		config.Mode = def.Mode
+	}
+	if config.GRPCAddr == "" {
+		config.GRPCAddr = def.GRPCAddr
 	}
 
-	if err := os.MkdirAll(filepath.Dir(cfg.WALPath), 0o755); err != nil {
+	walDir := filepath.Join(config.DataDir, "wal")
+	chunksDir := filepath.Join(config.DataDir, "chunks")
+
+	if err := os.MkdirAll(walDir, 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
 		return nil, err
 	}
 
 	db := &DB{
 		metricIdx: newMetricIndex(),
-		path:      cfg.WALPath,
-		config:    cfg,
+		config:    config,
 		closeCh:   make(chan struct{}),
 		walDone:   make(chan struct{}),
 		subs:      make(map[uint64]*subscription),
@@ -87,21 +101,37 @@ func Open(cfg Config) (*DB, error) {
 		db.shards[i].series = make(map[seriesID]*series)
 	}
 
-	// Сначала replay WAL в память
-	records, err := replayWAL(cfg.WALPath)
+	// 1. Загружаем chunks (исторические данные)
+	chunkRecords, err := chunk.ReadAllChunks(chunksDir)
 	if err != nil {
-		return nil, fmt.Errorf("replay WAL: %w", err)
+		return nil, fmt.Errorf("load chunks: %w", err)
 	}
-	for _, rec := range records {
+	for _, rec := range chunkRecords {
 		db.applyRecord(rec)
 	}
 
-	// Затем открываем WAL для записи (O_APPEND)
-	w, err := openWAL(cfg.WALPath)
+	// 2. Replay всех WAL сегментов
+	walPaths, err := wal.ListSegmentPaths(walDir)
+	if err != nil {
+		return nil, fmt.Errorf("list wal segments: %w", err)
+	}
+	for _, path := range walPaths {
+		records, err := wal.Replay(path)
+		if err != nil {
+			return nil, fmt.Errorf("replay WAL %s: %w", path, err)
+		}
+		for _, rec := range records {
+			db.applyRecord(rec)
+		}
+	}
+
+	// 3. Открываем WAL manager
+	wm, err := wal.Open(walDir, config.WALMaxSize)
 	if err != nil {
 		return nil, err
 	}
-	db.w = w
+	db.wm = wm
+	db.cw = chunk.NewWriter(chunksDir)
 
 	go db.bgLoop()
 
@@ -111,8 +141,11 @@ func Open(cfg Config) (*DB, error) {
 func (db *DB) bgLoop() {
 	defer close(db.walDone)
 
-	flushTicker := time.NewTicker(db.config.FlushInterval)
-	defer flushTicker.Stop()
+	walSyncTicker := time.NewTicker(walSyncInterval)
+	defer walSyncTicker.Stop()
+
+	chunkFlushTicker := time.NewTicker(db.config.FlushInterval)
+	defer chunkFlushTicker.Stop()
 
 	var retentionC <-chan time.Time
 	if db.config.RetentionDuration > 0 {
@@ -128,24 +161,83 @@ func (db *DB) bgLoop() {
 	for {
 		select {
 		case <-db.closeCh:
-			db.w.flush()
+			db.wm.Flush()
 			return
-		case <-flushTicker.C:
-			db.w.flush()
+		case <-walSyncTicker.C:
+			db.wm.Flush()
+			if db.wm.ShouldRotate() {
+				_ = db.flushToChunks()
+			}
+		case <-chunkFlushTicker.C:
+			_ = db.flushToChunks()
 		case <-retentionC:
 			db.enforceRetention()
 		}
 	}
 }
 
+// flushToChunks ротирует WAL, пишет sealed сегмент в chunks и удаляет его.
+func (db *DB) flushToChunks() error {
+	sealedPath, err := db.wm.Rotate()
+	if err != nil {
+		return fmt.Errorf("rotate WAL: %w", err)
+	}
+
+	records, err := wal.Replay(sealedPath)
+	if err != nil {
+		return fmt.Errorf("read sealed WAL %s: %w", sealedPath, err)
+	}
+	if len(records) == 0 {
+		_ = os.Remove(sealedPath)
+		return nil
+	}
+
+	// Группируем записи по метрике → series
+	metricSeries := make(map[string]map[seriesID]*series)
+	for _, rec := range records {
+		id := seriesID(model.HashSeries(rec.Metric, rec.Labels))
+		if metricSeries[rec.Metric] == nil {
+			metricSeries[rec.Metric] = make(map[seriesID]*series)
+		}
+		ser := metricSeries[rec.Metric][id]
+		if ser == nil {
+			ser = &series{
+				metric: rec.Metric,
+				labels: cloneLabels(rec.Labels),
+				points: make([]model.Point, 0, len(rec.Points)),
+			}
+			metricSeries[rec.Metric][id] = ser
+		}
+		for _, p := range rec.Points {
+			insertPointSorted(&ser.points, p)
+		}
+	}
+
+	for metric, serMap := range metricSeries {
+		serSlice := make([]*model.SeriesResult, 0, len(serMap))
+		for _, ser := range serMap {
+			serSlice = append(serSlice, &model.SeriesResult{
+				Metric: ser.metric,
+				Labels: ser.labels,
+				Points: ser.points,
+			})
+		}
+		if err := db.cw.Write(metric, serSlice); err != nil {
+			return fmt.Errorf("write chunk for %s: %w", metric, err)
+		}
+	}
+
+	return os.Remove(sealedPath)
+}
+
+// Close закрывает БД и сбрасывает WAL.
 func (db *DB) Close() error {
 	close(db.closeCh)
 	<-db.walDone
-	return db.w.close()
+	return db.wm.Close()
 }
 
 // Write записывает одно или несколько значений для метрики с текущим timestamp.
-// WAL пишется синхронно (в буфер) до обновления памяти — гарантирует порядок durability.
 func (db *DB) Write(metric string, labels map[string]string, value ...float64) error {
 	if metric == "" {
 		return errors.New("metric is required")
@@ -155,16 +247,16 @@ func (db *DB) Write(metric string, labels map[string]string, value ...float64) e
 	}
 
 	ts := time.Now().UnixNano()
-	points := make([]Point, len(value))
+	points := make([]model.Point, len(value))
 	for i, v := range value {
-		points[i] = Point{Timestamp: ts, Value: v}
+		points[i] = model.Point{Timestamp: ts, Value: v}
 	}
 
 	return db.writeBatch(metric, labels, points)
 }
 
 // WriteBatch записывает точки с произвольными timestamp (используется gRPC-сервером).
-func (db *DB) WriteBatch(metric string, labels map[string]string, points []Point) error {
+func (db *DB) WriteBatch(metric string, labels map[string]string, points []model.Point) error {
 	if metric == "" {
 		return errors.New("metric is required")
 	}
@@ -174,15 +266,15 @@ func (db *DB) WriteBatch(metric string, labels map[string]string, points []Point
 	return db.writeBatch(metric, labels, points)
 }
 
-func (db *DB) writeBatch(metric string, labels map[string]string, points []Point) error {
+func (db *DB) writeBatch(metric string, labels map[string]string, points []model.Point) error {
 	labelsCopy := cloneLabels(labels)
-	pointsCopy := make([]Point, len(points))
+	pointsCopy := make([]model.Point, len(points))
 	copy(pointsCopy, points)
 
-	rec := walRecord{Metric: metric, Labels: labelsCopy, Points: pointsCopy}
+	rec := model.Record{Metric: metric, Labels: labelsCopy, Points: pointsCopy}
 
 	// WAL first — гарантирует durability ordering
-	if err := db.w.write(rec); err != nil {
+	if err := db.wm.Write(rec); err != nil {
 		return fmt.Errorf("WAL write: %w", err)
 	}
 
@@ -196,8 +288,8 @@ func (db *DB) writeBatch(metric string, labels map[string]string, points []Point
 	return nil
 }
 
-func (db *DB) applyRecord(rec walRecord) {
-	id := hashSeries(rec.Metric, rec.Labels)
+func (db *DB) applyRecord(rec model.Record) {
+	id := seriesID(model.HashSeries(rec.Metric, rec.Labels))
 	sh := db.shardFor(id)
 
 	sh.mu.Lock()
@@ -206,7 +298,7 @@ func (db *DB) applyRecord(rec walRecord) {
 		ser = &series{
 			metric: rec.Metric,
 			labels: cloneLabels(rec.Labels),
-			points: make([]Point, 0, len(rec.Points)),
+			points: make([]model.Point, 0, len(rec.Points)),
 		}
 		sh.series[id] = ser
 	}
@@ -215,7 +307,6 @@ func (db *DB) applyRecord(rec walRecord) {
 	}
 	sh.mu.Unlock()
 
-	// Добавляем в индекс только для новых серий (после освобождения шард-мьютекса)
 	if !exists {
 		db.metricIdx.add(rec.Metric, id)
 	}
@@ -255,9 +346,9 @@ func (db *DB) enforceRetention() {
 	}
 }
 
-// Subscribe возвращает id подписки и канал, в который будут приходить новые точки.
-func (db *DB) Subscribe(metric string, labels map[string]string) (uint64, <-chan Point) {
-	ch := make(chan Point, 256)
+// Subscribe возвращает id подписки и канал с новыми точками.
+func (db *DB) Subscribe(metric string, labels map[string]string) (uint64, <-chan model.Point) {
+	ch := make(chan model.Point, 256)
 	sub := &subscription{metric: metric, labels: cloneLabels(labels), ch: ch}
 	id := db.subSeq.Add(1)
 
@@ -278,7 +369,7 @@ func (db *DB) Unsubscribe(id uint64) {
 	db.subsMu.Unlock()
 }
 
-func (db *DB) notify(metric string, labels map[string]string, points []Point) {
+func (db *DB) notify(metric string, labels map[string]string, points []model.Point) {
 	db.subsMu.RLock()
 	defer db.subsMu.RUnlock()
 
@@ -289,19 +380,18 @@ func (db *DB) notify(metric string, labels map[string]string, points []Point) {
 		for _, p := range points {
 			select {
 			case sub.ch <- p:
-			default: // дроп если подписчик медленный
+			default:
 			}
 		}
 	}
 }
 
-// Metrics возвращает список всех метрик хранящихся в БД.
+// Metrics возвращает список всех метрик в БД.
 func (db *DB) Metrics() []string {
 	return db.metricIdx.list()
 }
 
 // Watch возвращает канал, который получает сигнал при каждом Write.
-// Канал буферизован на 1 — множественные быстрые записи сливаются в один сигнал.
 func (db *DB) Watch() (uint64, <-chan struct{}) {
 	ch := make(chan struct{}, 1)
 	id := db.watcherSeq.Add(1)
@@ -334,30 +424,11 @@ func (db *DB) broadcastWatchers() {
 
 // DrainWAL принудительно сбрасывает WAL на диск (fsync).
 func (db *DB) DrainWAL() {
-	db.w.flush()
+	db.wm.Flush()
 }
 
 func (db *DB) shardFor(id seriesID) *seriesShard {
 	return &db.shards[uint64(id)%numShards]
-}
-
-func hashSeries(metric string, labels map[string]string) seriesID {
-	keys := make([]string, 0, len(labels))
-	for k := range labels {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(metric))
-	_, _ = h.Write([]byte{0})
-	for _, k := range keys {
-		_, _ = h.Write([]byte(k))
-		_, _ = h.Write([]byte("="))
-		_, _ = h.Write([]byte(labels[k]))
-		_, _ = h.Write([]byte{0})
-	}
-	return seriesID(h.Sum64())
 }
 
 func labelsMatch(filter, actual map[string]string) bool {
@@ -372,7 +443,7 @@ func labelsMatch(filter, actual map[string]string) bool {
 	return true
 }
 
-func insertPointSorted(points *[]Point, p Point) {
+func insertPointSorted(points *[]model.Point, p model.Point) {
 	ps := *points
 	n := len(ps)
 
@@ -389,7 +460,7 @@ func insertPointSorted(points *[]Point, p Point) {
 		return
 	}
 
-	ps = append(ps, Point{})
+	ps = append(ps, model.Point{})
 	copy(ps[i+1:], ps[i:])
 	ps[i] = p
 	*points = ps

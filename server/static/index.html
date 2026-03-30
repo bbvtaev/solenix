@@ -3,8 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Pulse — Metrics Explorer</title>
-  <script src="/chart.min.js"></script>
+  <title>Pulse</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -16,6 +15,7 @@
       --green:   #4ade80;
       --text:    #e2e8f0;
       --muted:   #64748b;
+      --danger:  #f87171;
     }
 
     body {
@@ -24,444 +24,210 @@
       color: var(--text);
       display: flex;
       flex-direction: column;
-      min-height: 100vh;
+      height: 100vh;
+      overflow: hidden;
     }
 
-    /* ── Header ── */
     header {
       display: flex;
       align-items: center;
       gap: 12px;
-      padding: 0 24px;
-      height: 52px;
+      padding: 0 20px;
+      height: 48px;
       border-bottom: 1px solid var(--border);
       background: var(--surface);
-      position: sticky;
-      top: 0;
-      z-index: 10;
       flex-shrink: 0;
     }
-    .logo { font-size: 17px; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; }
-    .header-sep { color: var(--border); }
-    .header-info { font-size: 12px; color: var(--muted); }
-    .header-right {
-      margin-left: auto;
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      font-size: 12px;
-      color: var(--muted);
-    }
-    .live-dot {
-      width: 7px; height: 7px; border-radius: 50%;
-      background: var(--green);
-      animation: blink 2s infinite;
-    }
-    .live-dot.dead { background: var(--muted); animation: none; }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
+    .logo { font-size: 16px; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; }
+    .sep  { color: var(--border); }
+    .ver  { font-size: 12px; color: var(--muted); }
+    .hright { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+    .dot.dead { background: var(--danger); }
 
-    /* ── Content ── */
-    .content {
-      flex: 1;
-      padding: 24px;
-    }
-
-    /* ── Empty state ── */
-    .empty {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 12px;
-      height: 300px;
-      color: var(--muted);
-      font-size: 14px;
-    }
-    .empty svg { opacity: .25; }
-
-    /* ── Grid ── */
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-      gap: 16px;
-    }
-
-    /* ── Metric card ── */
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
-    }
-    .card-header {
-      padding: 14px 16px 10px;
-      display: flex;
-      align-items: baseline;
-      gap: 10px;
-      border-bottom: 1px solid var(--border);
-    }
-    .card-metric {
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--text);
-      font-family: monospace;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      flex: 1;
-    }
-    .card-stats {
-      display: flex;
-      gap: 12px;
-      flex-shrink: 0;
-    }
-    .stat {
-      font-size: 11px;
-      color: var(--muted);
-    }
-    .stat b { color: var(--text); font-weight: 500; }
-
-    .chart-wrap {
-      padding: 12px 16px 8px;
-      height: 160px;
-      position: relative;
-    }
-
-    /* ── Series tags ── */
-    .series-list {
-      padding: 0 16px 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    .series-row {
+    .toolbar {
       display: flex;
       align-items: center;
       gap: 8px;
-      font-size: 11px;
+      padding: 10px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      flex-shrink: 0;
     }
-    .series-color {
-      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-    }
-    .series-tags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
+    #filter {
       flex: 1;
+      max-width: 360px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      outline: none;
     }
+    #filter::placeholder { color: var(--muted); }
+    #filter:focus { border-color: var(--accent); }
+
+    .tmeta { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+    .table-wrap {
+      flex: 1;
+      overflow-y: auto;
+    }
+    .table-wrap::-webkit-scrollbar { width: 4px; }
+    .table-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    thead {
+      position: sticky;
+      top: 0;
+      background: var(--surface);
+      z-index: 1;
+    }
+    thead th {
+      text-align: left;
+      padding: 10px 16px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    tbody tr { border-bottom: 1px solid var(--border); }
+    tbody tr:hover { background: rgba(255,255,255,.025); }
+    tbody td { padding: 9px 16px; vertical-align: middle; }
+
+    .metric-name { font-family: monospace; color: var(--accent); font-size: 13px; white-space: nowrap; }
     .tag {
-      background: rgba(108,142,245,.1);
-      border: 1px solid rgba(108,142,245,.18);
-      color: var(--accent);
+      display: inline-block;
+      background: rgba(108,142,245,.08);
+      border: 1px solid rgba(108,142,245,.15);
+      color: var(--muted);
       padding: 1px 6px;
       border-radius: 3px;
       font-family: monospace;
-      font-size: 10px;
+      font-size: 11px;
+      margin: 1px;
+      white-space: nowrap;
     }
-    .no-labels { color: var(--muted); }
-    .series-pts { color: var(--muted); flex-shrink: 0; }
-    .series-latest { color: var(--text); font-weight: 500; flex-shrink: 0; }
+    .tag b { color: var(--text); font-weight: 500; }
+    .val { font-family: monospace; font-size: 13px; font-weight: 600; }
+    .ts  { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+    .empty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 80px 20px;
+      color: var(--muted);
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
 
 <header>
   <span class="logo">⚡ Pulse</span>
-  <span class="header-sep">|</span>
-  <span class="header-info" id="version">connecting...</span>
-  <div class="header-right">
-    <span id="metric-count">0 metrics</span>
-    <div class="live-dot dead" id="live-dot"></div>
+  <span class="sep">|</span>
+  <span class="ver" id="version">loading...</span>
+  <div class="hright">
+    <div class="dot dead" id="dot"></div>
+    <span id="status">connecting</span>
   </div>
 </header>
 
-<div class="content" id="content">
-  <div class="empty">
-    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-    </svg>
-    <span>Waiting for metrics...</span>
-  </div>
+<div class="toolbar">
+  <input id="filter" type="text" placeholder="filter by metric or label..." />
+  <span class="tmeta" id="meta"></span>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Metric</th>
+        <th>Labels</th>
+        <th>Value</th>
+        <th>Time</th>
+      </tr>
+    </thead>
+    <tbody id="tbody">
+      <tr><td colspan="4" class="empty">Loading...</td></tr>
+    </tbody>
+  </table>
 </div>
 
 <script>
-  const COLORS = ['#6c8ef5','#4ade80','#fb923c','#f472b6','#a78bfa','#34d399','#fbbf24','#60a5fa'];
+  const REFRESH_MS = 10_000;
+  let allRows = [];
+  let filterVal = '';
 
-  let charts = {};   // metric → Chart instance
-  let snapshot = []; // last known metrics[]
+  async function load() {
+    try {
+      const [health, latest] = await Promise.all([
+        fetch('/api/health').then(r => r.json()),
+        fetch('/api/latest').then(r => r.json()),
+      ]);
 
-  // ── API ───────────────────────────────────────────────────────────────────
+      document.getElementById('version').textContent = `pulse-core ${health.version}`;
+      document.getElementById('dot').classList.remove('dead');
+      document.getElementById('status').textContent = 'ok';
 
-  async function fetchSnapshot() {
-    const r = await fetch('/api/snapshot');
-    const data = await r.json();
-    return data.metrics || [];
-  }
-
-  async function fetchHealth() {
-    const r = await fetch('/api/health');
-    return r.json();
-  }
-
-  // ── Render ────────────────────────────────────────────────────────────────
-
-  function totalPoints(metric) {
-    return (metric.series || []).reduce((s, sr) => s + sr.total_points, 0);
-  }
-
-  function latestValue(metric) {
-    let latest = null;
-    for (const s of (metric.series || [])) {
-      if (!s.points.length) continue;
-      const p = s.points[s.points.length - 1];
-      if (!latest || p.timestamp > latest.timestamp) latest = p;
+      allRows = latest.rows || [];
+      render();
+    } catch {
+      document.getElementById('dot').classList.add('dead');
+      document.getElementById('status').textContent = 'offline';
     }
-    return latest;
   }
 
-  function renderGrid(metrics) {
-    const content = document.getElementById('content');
+  function render() {
+    const q = filterVal.trim().toLowerCase();
+    const rows = q
+      ? allRows.filter(r =>
+          r.metric.toLowerCase().includes(q) ||
+          Object.entries(r.labels || {}).some(([k, v]) =>
+            (k + '=' + v).toLowerCase().includes(q)))
+      : allRows;
 
-    document.getElementById('metric-count').textContent =
-      `${metrics.length} metric${metrics.length !== 1 ? 's' : ''}`;
+    document.getElementById('meta').textContent =
+      `${rows.length} series · ${new Date().toLocaleTimeString()}`;
 
-    if (metrics.length === 0) {
-      content.innerHTML = `
-        <div class="empty">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-          </svg>
-          <span>No metrics yet</span>
-        </div>`;
+    const tbody = document.getElementById('tbody');
+
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty">${q ? 'No matches' : 'No metrics yet'}</td></tr>`;
       return;
     }
 
-    // Создаём/обновляем карточки
-    const existingCards = new Set(Object.keys(charts));
-    const incomingNames = new Set(metrics.map(m => m.metric));
-
-    // Удаляем карточки метрик которых больше нет
-    for (const name of existingCards) {
-      if (!incomingNames.has(name)) {
-        charts[name].destroy();
-        delete charts[name];
-      }
-    }
-
-    // Если сетки нет — создаём
-    let grid = content.querySelector('.grid');
-    if (!grid) {
-      content.innerHTML = '<div class="grid"></div>';
-      grid = content.querySelector('.grid');
-    }
-
-    // Для каждой метрики — создать карточку или обновить данные
-    for (const metric of metrics) {
-      const name = metric.metric;
-      let card = grid.querySelector(`[data-metric="${CSS.escape(name)}"]`);
-
-      if (!card) {
-        card = document.createElement('div');
-        card.className = 'card';
-        card.dataset.metric = name;
-        card.innerHTML = buildCardHTML(metric);
-        grid.appendChild(card);
-        buildChart(card, metric);
-      } else {
-        updateCard(card, metric);
-      }
-    }
-
-    // Синхронизируем порядок карточек в DOM с порядком метрик
-    metrics.forEach((metric, i) => {
-      const card = grid.querySelector(`[data-metric="${CSS.escape(metric.metric)}"]`);
-      if (card && grid.children[i] !== card) {
-        grid.insertBefore(card, grid.children[i]);
-      }
-    });
-  }
-
-  function buildCardHTML(metric) {
-    const latest = latestValue(metric);
-    const pts = totalPoints(metric);
-    return `
-      <div class="card-header">
-        <div class="card-metric" title="${metric.metric}">${metric.metric}</div>
-        <div class="card-stats">
-          <div class="stat"><b id="pts-${cssId(metric.metric)}">${fmtNum(pts)}</b> pts</div>
-          ${latest ? `<div class="stat">latest <b id="lat-${cssId(metric.metric)}">${latest.value.toFixed(3)}</b></div>` : ''}
-        </div>
-      </div>
-      <div class="chart-wrap">
-        <canvas id="chart-${cssId(metric.metric)}"></canvas>
-      </div>
-      <div class="series-list" id="slist-${cssId(metric.metric)}">
-        ${buildSeriesRows(metric.series)}
-      </div>
-    `;
-  }
-
-  function updateCard(card, metric) {
-    const name = metric.metric;
-    const id = cssId(name);
-    const latest = latestValue(metric);
-    const pts = totalPoints(metric);
-
-    const ptsEl = card.querySelector(`#pts-${id}`);
-    if (ptsEl) ptsEl.textContent = fmtNum(pts);
-
-    const latEl = card.querySelector(`#lat-${id}`);
-    if (latEl && latest) latEl.textContent = latest.value.toFixed(3);
-
-    const slist = card.querySelector(`#slist-${id}`);
-    if (slist) slist.innerHTML = buildSeriesRows(metric.series);
-
-    // Обновляем данные чарта без пересоздания
-    const ch = charts[name];
-    if (ch) {
-      ch.data.datasets = buildDatasets(metric.series);
-      ch.update('none'); // без анимации
-    }
-  }
-
-  function buildSeriesRows(series) {
-    if (!series || series.length === 0) return '';
-    return series.map((s, i) => {
-      const color = COLORS[i % COLORS.length];
-      const last = s.points.length ? s.points[s.points.length - 1] : null;
-      const tags = Object.entries(s.labels || {});
-      return `
-        <div class="series-row">
-          <div class="series-color" style="background:${color}"></div>
-          <div class="series-tags">
-            ${tags.length
-              ? tags.map(([k, v]) => `<span class="tag">${k}="${v}"</span>`).join('')
-              : '<span class="no-labels">no labels</span>'}
-          </div>
-          <span class="series-pts">${fmtNum(s.total_points)} pts</span>
-          ${last ? `<span class="series-latest">${last.value.toFixed(3)}</span>` : ''}
-        </div>`;
+    tbody.innerHTML = rows.map(r => {
+      const tags = Object.entries(r.labels || {});
+      const ts   = new Date(r.timestamp / 1e6);
+      return `<tr>
+        <td><span class="metric-name">${esc(r.metric)}</span></td>
+        <td>${tags.map(([k, v]) => `<span class="tag">${esc(k)}=<b>${esc(v)}</b></span>`).join(' ')}</td>
+        <td><span class="val">${r.value.toFixed(6)}</span></td>
+        <td><span class="ts">${ts.toLocaleTimeString()}</span></td>
+      </tr>`;
     }).join('');
   }
 
-  function buildDatasets(series) {
-    return (series || []).map((s, i) => {
-      const sorted = [...s.points].sort((a, b) => a.timestamp - b.timestamp);
-      return {
-        label: labelsStr(s.labels) || 'default',
-        data: sorted.map(p => ({ x: p.timestamp / 1e6, y: p.value })),
-        borderColor: COLORS[i % COLORS.length],
-        backgroundColor: COLORS[i % COLORS.length] + '18',
-        borderWidth: 1.5,
-        pointRadius: sorted.length > 60 ? 0 : 2.5,
-        tension: 0.3,
-        fill: false,
-      };
-    });
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
-  function buildChart(card, metric) {
-    const canvas = card.querySelector(`#chart-${cssId(metric.metric)}`);
-    if (!canvas) return;
+  document.getElementById('filter').addEventListener('input', e => {
+    filterVal = e.target.value;
+    render();
+  });
 
-    if (charts[metric.metric]) {
-      charts[metric.metric].destroy();
-    }
-
-    charts[metric.metric] = new Chart(canvas, {
-      type: 'line',
-      data: { datasets: buildDatasets(metric.series) },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        animation: false,
-        interaction: { mode: 'index', intersect: false },
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            backgroundColor: '#0f1117',
-            borderColor: '#2a2d3a',
-            borderWidth: 1,
-            titleColor: '#e2e8f0',
-            bodyColor: '#94a3b8',
-            callbacks: {
-              title: items => new Date(items[0].parsed.x).toLocaleTimeString(),
-              label: item => ` ${item.dataset.label}: ${item.parsed.y.toFixed(4)}`,
-            }
-          }
-        },
-        scales: {
-          x: {
-            type: 'linear',
-            ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 5,
-              callback: v => new Date(v).toLocaleTimeString() },
-            grid: { color: '#1e2130' },
-          },
-          y: {
-            ticks: { color: '#64748b', font: { size: 9 }, maxTicksLimit: 4 },
-            grid: { color: '#1e2130' },
-          }
-        }
-      }
-    });
-  }
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
-
-  function cssId(name) {
-    return name.replace(/[^a-zA-Z0-9_-]/g, '_');
-  }
-
-  function labelsStr(labels) {
-    return Object.entries(labels || {}).map(([k, v]) => `${k}=${v}`).join(' ');
-  }
-
-  function fmtNum(n) {
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
-    return String(n);
-  }
-
-  // ── SSE ───────────────────────────────────────────────────────────────────
-
-  function connect() {
-    const dot = document.getElementById('live-dot');
-    const source = new EventSource('/api/stream');
-
-    source.onopen = () => {
-      dot.classList.remove('dead');
-    };
-
-    source.onmessage = async () => {
-      const metrics = await fetchSnapshot();
-      renderGrid(metrics);
-    };
-
-    source.onerror = () => {
-      dot.classList.add('dead');
-      source.close();
-      // Переподключение через 3s
-      setTimeout(connect, 3000);
-    };
-  }
-
-  // ── Init ──────────────────────────────────────────────────────────────────
-
-  async function init() {
-    try {
-      const h = await fetchHealth();
-      document.getElementById('version').textContent =
-        `pulse-core ${h.version}`;
-    } catch {
-      document.getElementById('version').textContent = 'pulse-core';
-    }
-
-    connect();
-  }
-
-  init();
+  load();
+  setInterval(load, REFRESH_MS);
 </script>
 </body>
 </html>

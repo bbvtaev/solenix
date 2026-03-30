@@ -1,4 +1,4 @@
-package pulse
+package config
 
 import (
 	"fmt"
@@ -6,18 +6,40 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/bbvtaev/pulse-core/internal/model"
 	"gopkg.in/yaml.v3"
 )
 
+// Config задаёт параметры запуска БД и серверов.
+type Config struct {
+	// Storage
+	DataDir           string        `yaml:"data_dir"`
+	WALMaxSize        int64         `yaml:"wal_max_size"`  // байт; default 32 MiB
+	RetentionDuration time.Duration `yaml:"retention"`
+	FlushInterval     time.Duration `yaml:"flush_interval"` // интервал flush в chunks; default 2m
+
+	// Server
+	Mode     model.ServerMode `yaml:"mode"`
+	GRPCAddr string           `yaml:"grpc_addr"`
+	HTTPAddr string           `yaml:"http_addr"`
+
+	// Auth
+	Auth model.AuthConfig `yaml:"auth"`
+
+	// Collector
+	Collector model.CollectorConfig `yaml:"collector"`
+}
+
 // rawConfig — промежуточная структура для парсинга YAML.
-// Длительности хранятся как строки ("24h", "100ms") и конвертируются в time.Duration.
+// Длительности хранятся как строки и конвертируются в time.Duration.
 type rawConfig struct {
-	WALPath       string     `yaml:"wal_path"`
-	Retention     string     `yaml:"retention"`
-	FlushInterval string     `yaml:"flush_interval"`
-	Mode          ServerMode `yaml:"mode"`
-	GRPCAddr      string     `yaml:"grpc_addr"`
-	HTTPAddr      string     `yaml:"http_addr"`
+	DataDir       string           `yaml:"data_dir"`
+	WALMaxSize    int64            `yaml:"wal_max_size"`
+	Retention     string           `yaml:"retention"`
+	FlushInterval string           `yaml:"flush_interval"`
+	Mode          model.ServerMode `yaml:"mode"`
+	GRPCAddr      string           `yaml:"grpc_addr"`
+	HTTPAddr      string           `yaml:"http_addr"`
 	Auth          struct {
 		Enabled bool     `yaml:"enabled"`
 		APIKeys []string `yaml:"api_keys"`
@@ -29,7 +51,6 @@ type rawConfig struct {
 }
 
 // LoadConfig читает YAML файл и возвращает Config.
-// Незаполненные поля получают значения из DefaultConfig().
 func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -43,8 +64,11 @@ func LoadConfig(path string) (Config, error) {
 
 	cfg := DefaultConfig()
 
-	if raw.WALPath != "" {
-		cfg.WALPath = raw.WALPath
+	if raw.DataDir != "" {
+		cfg.DataDir = raw.DataDir
+	}
+	if raw.WALMaxSize > 0 {
+		cfg.WALMaxSize = raw.WALMaxSize
 	}
 	if raw.Mode != "" {
 		cfg.Mode = raw.Mode
@@ -69,7 +93,7 @@ func LoadConfig(path string) (Config, error) {
 		}
 		cfg.FlushInterval = d
 	}
-	cfg.Auth = AuthConfig{
+	cfg.Auth = model.AuthConfig{
 		Enabled: raw.Auth.Enabled,
 		APIKeys: raw.Auth.APIKeys,
 	}
@@ -88,22 +112,23 @@ func LoadConfig(path string) (Config, error) {
 // DefaultConfig возвращает конфиг со значениями по умолчанию.
 func DefaultConfig() Config {
 	return Config{
-		WALPath:       defaultWALPath(),
-		Mode:          ModeSelfHosted,
+		DataDir:       defaultDataDir(),
+		WALMaxSize:    32 << 20, // 32 MiB
+		Mode:          model.ModeSelfHosted,
 		GRPCAddr:      ":50051",
 		HTTPAddr:      ":8080",
-		FlushInterval: 100 * time.Millisecond,
-		Collector: CollectorConfig{
+		FlushInterval: 2 * time.Minute,
+		Collector: model.CollectorConfig{
 			Enabled:  true,
 			Interval: 15 * time.Second,
 		},
 	}
 }
 
-func defaultWALPath() string {
+func defaultDataDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "./data/metrics.wal"
+		return "./data"
 	}
-	return filepath.Join(home, "pulse", "metrics.wal")
+	return filepath.Join(home, "pulse", "data")
 }
