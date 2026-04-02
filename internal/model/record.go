@@ -5,11 +5,26 @@ import (
 	"sort"
 )
 
-// Record — одна WAL-запись: батч точек для конкретной серии metric+labels.
+// RecordType определяет тип WAL-записи.
+type RecordType uint8
+
+const (
+	RecordWrite  RecordType = 0
+	RecordDelete RecordType = 1
+)
+
+// Record — одна WAL-запись.
 type Record struct {
+	Type   RecordType
 	Metric string
 	Labels map[string]string
+
+	// RecordWrite
 	Points []Point
+
+	// RecordDelete
+	DeleteFrom int64
+	DeleteTo   int64
 }
 
 // HashSeries возвращает стабильный FNV-64a хеш для пары metric+labels.
