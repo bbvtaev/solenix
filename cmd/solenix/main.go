@@ -17,7 +17,7 @@ var rootCmd = &cobra.Command{
 var serverAddr string
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&serverAddr, "addr", "localhost:8731", "solenix-core gRPC address")
+	rootCmd.PersistentFlags().StringVar(&serverAddr, "addr", "127.0.0.1:8731", "solenix-core gRPC address")
 	rootCmd.AddCommand(serveCmd, pushCmd, queryCmd, healthCmd, metricsCmd)
 }
 

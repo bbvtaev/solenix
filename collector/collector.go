@@ -2,17 +2,18 @@
 // Аналог prometheus/node_exporter, встроенный в ядро.
 //
 // Метрики:
-//   solenix_cpu_usage_percent     — загрузка CPU по ядрам
-//   solenix_mem_used_bytes        — использованная память
-//   solenix_mem_available_bytes   — доступная память
-//   solenix_mem_total_bytes       — общий объём памяти
-//   solenix_disk_read_bytes_total — прочитано с диска (counter)
-//   solenix_disk_write_bytes_total— записано на диск (counter)
-//   solenix_net_rx_bytes_total    — получено байт по сети (counter)
-//   solenix_net_tx_bytes_total    — отправлено байт по сети (counter)
-//   solenix_go_goroutines         — количество горутин процесса
-//   solenix_go_heap_used_bytes    — heap allocation
-//   solenix_go_gc_pause_ns        — пауза последнего GC
+//
+//	solenix_cpu_usage_percent     — загрузка CPU по ядрам
+//	solenix_mem_used_bytes        — использованная память
+//	solenix_mem_available_bytes   — доступная память
+//	solenix_mem_total_bytes       — общий объём памяти
+//	solenix_disk_read_bytes_total — прочитано с диска (counter)
+//	solenix_disk_write_bytes_total— записано на диск (counter)
+//	solenix_net_rx_bytes_total    — получено байт по сети (counter)
+//	solenix_net_tx_bytes_total    — отправлено байт по сети (counter)
+//	solenix_go_goroutines         — количество горутин процесса
+//	solenix_go_heap_used_bytes    — heap allocation
+//	solenix_go_gc_pause_ns        — пауза последнего GC
 package collector
 
 import (
@@ -111,10 +112,10 @@ func (c *Collector) collectMem(now int64, base map[string]string) {
 		slog.Debug("mem collect error", "err", err)
 		return
 	}
-	c.write("solenix_mem_total_bytes",     base, now, float64(v.Total))
-	c.write("solenix_mem_used_bytes",      base, now, float64(v.Used))
+	c.write("solenix_mem_total_bytes", base, now, float64(v.Total))
+	c.write("solenix_mem_used_bytes", base, now, float64(v.Used))
 	c.write("solenix_mem_available_bytes", base, now, float64(v.Available))
-	c.write("solenix_mem_usage_percent",   base, now, round(v.UsedPercent))
+	c.write("solenix_mem_usage_percent", base, now, round(v.UsedPercent))
 }
 
 // ── Disk I/O ──────────────────────────────────────────────────────────────────
@@ -127,10 +128,10 @@ func (c *Collector) collectDisk(now int64, base map[string]string) {
 	}
 	for device, stat := range counters {
 		l := merge(base, map[string]string{"device": device})
-		c.write("solenix_disk_read_bytes_total",  l, now, float64(stat.ReadBytes))
+		c.write("solenix_disk_read_bytes_total", l, now, float64(stat.ReadBytes))
 		c.write("solenix_disk_write_bytes_total", l, now, float64(stat.WriteBytes))
-		c.write("solenix_disk_read_ops_total",    l, now, float64(stat.ReadCount))
-		c.write("solenix_disk_write_ops_total",   l, now, float64(stat.WriteCount))
+		c.write("solenix_disk_read_ops_total", l, now, float64(stat.ReadCount))
+		c.write("solenix_disk_write_ops_total", l, now, float64(stat.WriteCount))
 	}
 }
 
@@ -147,8 +148,8 @@ func (c *Collector) collectNet(now int64, base map[string]string) {
 			continue // loopback не интересен
 		}
 		l := merge(base, map[string]string{"iface": stat.Name})
-		c.write("solenix_net_rx_bytes_total",   l, now, float64(stat.BytesRecv))
-		c.write("solenix_net_tx_bytes_total",   l, now, float64(stat.BytesSent))
+		c.write("solenix_net_rx_bytes_total", l, now, float64(stat.BytesRecv))
+		c.write("solenix_net_tx_bytes_total", l, now, float64(stat.BytesSent))
 		c.write("solenix_net_rx_packets_total", l, now, float64(stat.PacketsRecv))
 		c.write("solenix_net_tx_packets_total", l, now, float64(stat.PacketsSent))
 	}
@@ -160,12 +161,12 @@ func (c *Collector) collectGoRuntime(now int64, base map[string]string) {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 
-	c.write("solenix_go_goroutines",      base, now, float64(runtime.NumGoroutine()))
+	c.write("solenix_go_goroutines", base, now, float64(runtime.NumGoroutine()))
 	c.write("solenix_go_heap_used_bytes", base, now, float64(ms.HeapInuse))
-	c.write("solenix_go_heap_sys_bytes",  base, now, float64(ms.HeapSys))
-	c.write("solenix_go_gc_pause_ns",     base, now, float64(ms.PauseNs[(ms.NumGC+255)%256]))
-	c.write("solenix_go_gc_total",        base, now, float64(ms.NumGC))
-	c.write("solenix_go_alloc_bytes",     base, now, float64(ms.Alloc))
+	c.write("solenix_go_heap_sys_bytes", base, now, float64(ms.HeapSys))
+	c.write("solenix_go_gc_pause_ns", base, now, float64(ms.PauseNs[(ms.NumGC+255)%256]))
+	c.write("solenix_go_gc_total", base, now, float64(ms.NumGC))
+	c.write("solenix_go_alloc_bytes", base, now, float64(ms.Alloc))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -194,7 +195,7 @@ func round(v float64) float64 {
 func hostname() string {
 	name, err := getHostname()
 	if err != nil {
-		return "localhost"
+		return "127.0.0.1"
 	}
 	return name
 }

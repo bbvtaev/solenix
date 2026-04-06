@@ -5,7 +5,7 @@ solenix-core Python SDK
 
     from solenix import Client
 
-    client = Client("localhost:50051")
+    client = Client("127.0.0.1:8731")
 
     client.write("cpu.usage", {"host": "srv1"}, 72.5)
 
@@ -54,7 +54,7 @@ class SeriesResult:
 class Client:
     """gRPC клиент для solenix-core."""
 
-    def __init__(self, addr: str = "localhost:50051", timeout: float = 5.0) -> None:
+    def __init__(self, addr: str = "127.0.0.1:8731", timeout: float = 5.0) -> None:
         self._channel = grpc.insecure_channel(addr)
         self._stub = solenix_pb2_grpc.SolenixDBStub(self._channel)
         self._timeout = timeout

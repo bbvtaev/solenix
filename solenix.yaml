@@ -7,7 +7,7 @@ mode: self-hosted
 # gRPC адрес сервера
 grpc_addr: ":8731"
 
-# HTTP адрес UI и REST API (открой localhost:8080)
+# HTTP адрес UI и REST API (открой 127.0.0.1:8080)
 http_addr: ":8080"
 
 # Директория для хранения данных (WAL + chunks)

@@ -1,19 +1,21 @@
 // load-gen — генератор погодных метрик для solenix-core.
 //
 // Симулирует данные с метеостанций нескольких городов:
-//   weather_temperature_celsius   — температура воздуха
-//   weather_humidity_percent      — влажность
-//   weather_pressure_hpa          — атмосферное давление
-//   weather_wind_speed_ms         — скорость ветра
-//   weather_wind_direction_deg    — направление ветра
-//   weather_precipitation_mm      — осадки
-//   weather_uv_index              — УФ-индекс
-//   weather_visibility_km         — видимость
+//
+//	weather_temperature_celsius   — температура воздуха
+//	weather_humidity_percent      — влажность
+//	weather_pressure_hpa          — атмосферное давление
+//	weather_wind_speed_ms         — скорость ветра
+//	weather_wind_direction_deg    — направление ветра
+//	weather_precipitation_mm      — осадки
+//	weather_uv_index              — УФ-индекс
+//	weather_visibility_km         — видимость
 //
 // Флаги:
-//   -addr     адрес сервера       (default: localhost:50051)
-//   -rate     тиков в секунду     (default: 2)
-//   -stations количество станций  (default: все)
+//
+//	-addr     адрес сервера       (default: 127.0.0.1:8731)
+//	-rate     тиков в секунду     (default: 2)
+//	-stations количество станций  (default: все)
 //
 // Управление (stdin): [+] ускорить  [-] замедлить  [q] выйти
 package main
@@ -43,14 +45,14 @@ type station struct {
 	lat     float64 // широта — влияет на базовую температуру
 
 	// внутреннее состояние (плавно меняется)
-	temp        float64
-	humidity    float64
-	pressure    float64
-	windSpeed   float64
-	windDir     float64
-	precip      float64
-	uvIndex     float64
-	visibility  float64
+	temp       float64
+	humidity   float64
+	pressure   float64
+	windSpeed  float64
+	windDir    float64
+	precip     float64
+	uvIndex    float64
+	visibility float64
 }
 
 // Реальные города с их широтами
@@ -58,14 +60,14 @@ var defaultStations = []struct {
 	city, country string
 	lat           float64
 }{
-	{"Moscow",        "RU",  55.75},
-	{"London",        "GB",  51.50},
-	{"Tokyo",         "JP",  35.68},
-	{"New York",      "US",  40.71},
-	{"Dubai",         "AE",  25.20},
-	{"Sydney",        "AU", -33.86},
-	{"Reykjavik",     "IS",  64.13},
-	{"Singapore",     "SG",   1.35},
+	{"Moscow", "RU", 55.75},
+	{"London", "GB", 51.50},
+	{"Tokyo", "JP", 35.68},
+	{"New York", "US", 40.71},
+	{"Dubai", "AE", 25.20},
+	{"Sydney", "AU", -33.86},
+	{"Reykjavik", "IS", 64.13},
+	{"Singapore", "SG", 1.35},
 }
 
 func newStation(city, country string, lat float64, rng *rand.Rand) *station {
@@ -96,7 +98,7 @@ func (s *station) tick(rng *rand.Rand, t float64) []*pb.Series {
 	}
 
 	// ── Температура: суточный цикл + шум ──
-	hour := (t / 3600) // условный час
+	hour := (t / 3600)                            // условный час
 	diurnal := 4 * math.Sin((hour-14)*math.Pi/12) // пик в 14:00
 	s.temp += (diurnal*0.01 + (rng.Float64()-0.5)*0.3)
 	baseTemp := 25 - math.Abs(s.lat)/90*40
@@ -113,11 +115,15 @@ func (s *station) tick(rng *rand.Rand, t float64) []*pb.Series {
 	s.pressure = clamp(s.pressure, 970, 1040)
 
 	// ── Ветер: порывистый ──
-	s.windSpeed += (rng.Float64()-0.5)*1.2
+	s.windSpeed += (rng.Float64() - 0.5) * 1.2
 	s.windSpeed = clamp(s.windSpeed, 0, 35)
-	s.windDir += (rng.Float64()-0.5)*15
-	if s.windDir < 0 { s.windDir += 360 }
-	if s.windDir >= 360 { s.windDir -= 360 }
+	s.windDir += (rng.Float64() - 0.5) * 15
+	if s.windDir < 0 {
+		s.windDir += 360
+	}
+	if s.windDir >= 360 {
+		s.windDir -= 360
+	}
 
 	// ── Осадки: случайные эпизоды ──
 	if rng.Float64() < 0.05 {
@@ -138,13 +144,13 @@ func (s *station) tick(rng *rand.Rand, t float64) []*pb.Series {
 
 	return []*pb.Series{
 		pt("weather_temperature_celsius", labels, now, round2(s.temp)),
-		pt("weather_humidity_percent",    labels, now, round2(s.humidity)),
-		pt("weather_pressure_hpa",        labels, now, round2(s.pressure)),
-		pt("weather_wind_speed_ms",       labels, now, round2(s.windSpeed)),
-		pt("weather_wind_direction_deg",  labels, now, round2(s.windDir)),
-		pt("weather_precipitation_mm",    labels, now, round2(s.precip)),
-		pt("weather_uv_index",            labels, now, round2(s.uvIndex)),
-		pt("weather_visibility_km",       labels, now, round2(s.visibility)),
+		pt("weather_humidity_percent", labels, now, round2(s.humidity)),
+		pt("weather_pressure_hpa", labels, now, round2(s.pressure)),
+		pt("weather_wind_speed_ms", labels, now, round2(s.windSpeed)),
+		pt("weather_wind_direction_deg", labels, now, round2(s.windDir)),
+		pt("weather_precipitation_mm", labels, now, round2(s.precip)),
+		pt("weather_uv_index", labels, now, round2(s.uvIndex)),
+		pt("weather_visibility_km", labels, now, round2(s.visibility)),
 	}
 }
 
@@ -159,8 +165,12 @@ func pt(metric string, labels map[string]string, ts int64, value float64) *pb.Se
 }
 
 func clamp(v, min, max float64) float64 {
-	if v < min { return min }
-	if v > max { return max }
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
 	return v
 }
 
@@ -171,9 +181,9 @@ func round2(v float64) float64 {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
-	addr     := flag.String("addr",     "localhost:50051", "gRPC server address")
-	rate     := flag.Int("rate",        2,                 "ticks per second")
-	nstation := flag.Int("stations",    len(defaultStations), "number of stations (1–8)")
+	addr := flag.String("addr", "127.0.0.1:8731", "gRPC server address")
+	rate := flag.Int("rate", 2, "ticks per second")
+	nstation := flag.Int("stations", len(defaultStations), "number of stations (1–8)")
 	flag.Parse()
 
 	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -223,7 +233,9 @@ func main() {
 				fmt.Printf("→ rate: %d ticks/s\n", r)
 			case "-":
 				r := currentRate.Load() / 2
-				if r < 1 { r = 1 }
+				if r < 1 {
+					r = 1
+				}
 				currentRate.Store(r)
 				fmt.Printf("→ rate: %d ticks/s\n", r)
 			case "q":
@@ -255,7 +267,9 @@ func main() {
 	for {
 		r := currentRate.Load()
 		if r != lastRate {
-			if ticker != nil { ticker.Stop() }
+			if ticker != nil {
+				ticker.Stop()
+			}
 			ticker = time.NewTicker(time.Duration(float64(time.Second) / float64(r)))
 			lastRate = r
 		}
@@ -286,7 +300,11 @@ func stationNames(stations []*station) []string {
 }
 
 func clampInt(v, min, max int) int {
-	if v < min { return min }
-	if v > max { return max }
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
 	return v
 }
