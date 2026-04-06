@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 
 	solenix "github.com/bbvtaev/solenix-core"
 )
@@ -63,7 +64,19 @@ func (h *HTTPServer) handleQuery(w http.ResponseWriter, r *http.Request) {
 	from, _ := strconv.ParseInt(r.URL.Query().Get("from"), 10, 64)
 	to, _ := strconv.ParseInt(r.URL.Query().Get("to"), 10, 64)
 
-	results, err := h.db.Query(metric, nil, from, to)
+	var labels map[string]string
+	for _, kv := range r.URL.Query()["labels"] {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if labels == nil {
+			labels = make(map[string]string)
+		}
+		labels[k] = v
+	}
+
+	results, err := h.db.Query(metric, labels, from, to)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 		return

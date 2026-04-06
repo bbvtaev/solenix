@@ -479,39 +479,47 @@
     detailBody.innerHTML = '<div class="detail-loading">Loading…</div>';
     detail.classList.add('open');
 
-    fetch(`/api/query?metric=${encodeURIComponent(metric)}`)
+    const qp = new URLSearchParams({ metric });
+    for (const [k, v] of tags) qp.append('labels', `${k}=${v}`);
+    fetch(`/api/query?${qp}`)
       .then(r => r.json())
       .then(data => {
         const series = data.series || [];
-        // collect all points across series matching these labels, newest first
-        let points = [];
-        for (const s of series) {
-          // match labels if any
-          const match = tags.every(([k, v]) => s.labels && s.labels[k] === v);
-          if (tags.length === 0 || match) {
-            for (const p of (s.points || [])) {
-              points.push(p);
-            }
-          }
-        }
-        points.sort((a, b) => b.timestamp - a.timestamp);
 
-        if (points.length === 0) {
+        if (series.length === 0) {
           detailBody.innerHTML = '<div class="detail-loading">No data</div>';
           return;
         }
 
-        detailBody.innerHTML = `<table class="detail-table">
-          <thead><tr><th>#</th><th>Time</th><th>Value</th></tr></thead>
-          <tbody>${points.map((p, i) => {
+        const showSeriesHeader = series.length > 1;
+        detailBody.innerHTML = series.map(s => {
+          const sLabels = Object.entries(s.labels || {});
+          const points = [...(s.points || [])].sort((a, b) => b.timestamp - a.timestamp);
+          const rows = points.map((p, i) => {
             const ts = new Date(p.timestamp / 1e6);
             return `<tr>
               <td style="color:var(--muted)">${i + 1}</td>
               <td>${ts.toLocaleDateString()} ${ts.toLocaleTimeString()}</td>
               <td style="color:var(--accent)">${p.value.toFixed(6)}</td>
             </tr>`;
-          }).join('')}</tbody>
-        </table>`;
+          }).join('');
+
+          const header = showSeriesHeader ? `
+            <div style="padding:8px 16px;font-size:11px;background:rgba(255,255,255,.03);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              ${sLabels.length
+                ? sLabels.map(([k, v]) => `<span class="tag">${esc(k)}=<b>${esc(v)}</b></span>`).join(' ')
+                : '<span style="color:var(--muted);font-style:italic">no labels</span>'}
+              <span style="margin-left:auto;color:var(--muted)">${points.length} pts</span>
+            </div>` : '';
+
+          return `<div style="border-bottom:1px solid var(--border)">
+            ${header}
+            <table class="detail-table">
+              <thead><tr><th>#</th><th>Time</th><th>Value</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>`;
+        }).join('');
       })
       .catch(() => {
         detailBody.innerHTML = '<div class="detail-loading">Failed to load</div>';
