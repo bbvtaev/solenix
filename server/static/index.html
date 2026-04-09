@@ -100,7 +100,35 @@
     #filter::placeholder { color: var(--muted); }
     #filter:focus { border-color: var(--accent); }
 
-    .tmeta { margin-left: auto; font-size: 12px; color: var(--muted); }
+    .tmeta { font-size: 12px; color: var(--muted); }
+
+    /* Time range picker */
+    .tr-wrap { margin-left: auto; display: flex; align-items: center; gap: 8px; position: relative; }
+    .tr-btn {
+      display: flex; align-items: center; gap: 6px;
+      background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      padding: 5px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;
+      transition: border-color .15s;
+    }
+    .tr-btn:hover { border-color: var(--accent); }
+    .tr-btn svg { color: var(--muted); }
+    .tr-dropdown {
+      display: none; position: absolute; top: calc(100% + 6px); right: 0;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.5); z-index: 300; min-width: 160px; overflow: hidden;
+    }
+    .tr-dropdown.open { display: block; }
+    .tr-section { padding: 6px 0; border-bottom: 1px solid var(--border); }
+    .tr-section:last-child { border-bottom: none; }
+    .tr-label { padding: 4px 14px; font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+    .tr-opt {
+      display: block; width: 100%; text-align: left;
+      padding: 7px 14px; font-size: 13px; color: var(--text);
+      background: none; border: none; cursor: pointer;
+      transition: background .1s;
+    }
+    .tr-opt:hover { background: rgba(108,142,245,.1); }
+    .tr-opt.active { color: var(--accent); font-weight: 600; }
 
     .table-wrap {
       flex: 1;
@@ -217,6 +245,53 @@
     .detail-table td { padding: 7px 16px; border-bottom: 1px solid rgba(255,255,255,.04); font-family: monospace; }
     .detail-table tr:hover td { background: rgba(255,255,255,.02); }
     .detail-loading { padding: 40px; text-align: center; color: var(--muted); font-size: 13px; }
+
+    /* Chart area */
+    .detail-chart-wrap {
+      padding: 12px 16px 14px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      position: relative;
+    }
+    .detail-chart-wrap canvas { display: block; cursor: crosshair; }
+
+    /* Custom chart tooltip */
+    .chart-tooltip {
+      position: absolute;
+      pointer-events: none;
+      background: rgba(15, 17, 23, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-size: 12px;
+      white-space: nowrap;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 4px 24px rgba(0,0,0,.5);
+      transition: opacity .1s ease;
+      opacity: 0;
+      z-index: 10;
+      min-width: 140px;
+    }
+    .chart-tooltip.visible { opacity: 1; }
+    .chart-tooltip-time {
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 6px;
+      letter-spacing: .2px;
+    }
+    .chart-tooltip-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 2px 0;
+    }
+    .chart-tooltip-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .chart-tooltip-name { color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; }
+    .chart-tooltip-val  { font-family: monospace; font-weight: 600; color: var(--text); }
   </style>
 </head>
 <body>
@@ -268,6 +343,34 @@
 <div class="toolbar">
   <input id="filter" type="text" placeholder="filter by metric or label..." />
   <span class="tmeta" id="meta"></span>
+  <div class="tr-wrap">
+    <button class="tr-btn" id="tr-btn">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="8" cy="8" r="6.5"/><path d="M8 4v4l2.5 2"/>
+      </svg>
+      <span id="tr-label">Last 1h</span>
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M2 3.5l3 3 3-3"/>
+      </svg>
+    </button>
+    <div class="tr-dropdown" id="tr-dropdown">
+      <div class="tr-section">
+        <div class="tr-label">Relative</div>
+        <button class="tr-opt" data-range="5m">Last 5 minutes</button>
+        <button class="tr-opt" data-range="15m">Last 15 minutes</button>
+        <button class="tr-opt" data-range="30m">Last 30 minutes</button>
+        <button class="tr-opt active" data-range="1h">Last 1 hour</button>
+        <button class="tr-opt" data-range="6h">Last 6 hours</button>
+        <button class="tr-opt" data-range="12h">Last 12 hours</button>
+        <button class="tr-opt" data-range="24h">Last 24 hours</button>
+        <button class="tr-opt" data-range="7d">Last 7 days</button>
+        <button class="tr-opt" data-range="30d">Last 30 days</button>
+      </div>
+      <div class="tr-section">
+        <button class="tr-opt" data-range="all">All time</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Detail panel -->
@@ -277,6 +380,9 @@
     <button class="detail-close" id="detail-close">✕</button>
   </div>
   <div class="detail-meta" id="detail-meta"></div>
+  <div class="detail-chart-wrap" id="detail-chart-wrap" style="display:none">
+    <canvas id="detail-chart" height="120"></canvas>
+  </div>
   <div class="detail-body" id="detail-body">
     <div class="detail-loading">Loading…</div>
   </div>
@@ -297,6 +403,61 @@
     </tbody>
   </table>
 </div>
+
+<script src="chart.min.js"></script>
+
+<script>
+  // ── Time range state ────────────────────────────────────────────────────────
+  const RANGES = {
+    '5m':  { label: 'Last 5 minutes',  ms: 5   * 60 * 1000 },
+    '15m': { label: 'Last 15 minutes', ms: 15  * 60 * 1000 },
+    '30m': { label: 'Last 30 minutes', ms: 30  * 60 * 1000 },
+    '1h':  { label: 'Last 1 hour',     ms: 60  * 60 * 1000 },
+    '6h':  { label: 'Last 6 hours',    ms: 6   * 60 * 60 * 1000 },
+    '12h': { label: 'Last 12 hours',   ms: 12  * 60 * 60 * 1000 },
+    '24h': { label: 'Last 24 hours',   ms: 24  * 60 * 60 * 1000 },
+    '7d':  { label: 'Last 7 days',     ms: 7   * 24 * 60 * 60 * 1000 },
+    '30d': { label: 'Last 30 days',    ms: 30  * 24 * 60 * 60 * 1000 },
+    'all': { label: 'All time',        ms: 0 },
+  };
+
+  let currentRange = '1h';
+
+  // Returns { fromNs, toNs } for the current range (0 = no bound)
+  function getTimeRange() {
+    const r = RANGES[currentRange];
+    if (!r || r.ms === 0) return { fromNs: 0, toNs: 0 };
+    const toMs   = Date.now();
+    const fromMs = toMs - r.ms;
+    return { fromNs: fromMs * 1e6, toNs: toMs * 1e6 };
+  }
+
+  // ── Time range picker UI ────────────────────────────────────────────────────
+  const trBtn      = document.getElementById('tr-btn');
+  const trLabel    = document.getElementById('tr-label');
+  const trDropdown = document.getElementById('tr-dropdown');
+
+  trBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    trDropdown.classList.toggle('open');
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!trDropdown.contains(e.target) && e.target !== trBtn) {
+      trDropdown.classList.remove('open');
+    }
+  });
+
+  trDropdown.addEventListener('click', (e) => {
+    const opt = e.target.closest('.tr-opt');
+    if (!opt) return;
+    const range = opt.dataset.range;
+    currentRange = range;
+    trLabel.textContent = RANGES[range].label;
+    trDropdown.querySelectorAll('.tr-opt').forEach(o => o.classList.toggle('active', o === opt));
+    trDropdown.classList.remove('open');
+  });
+</script>
 
 <script>
   const REFRESH_MS = 10_000;
@@ -462,11 +623,195 @@
 <script>
 // Detail panel
 (function() {
-  const detail      = document.getElementById('detail');
-  const detailTitle = document.getElementById('detail-title');
-  const detailMeta  = document.getElementById('detail-meta');
-  const detailBody  = document.getElementById('detail-body');
-  const detailClose = document.getElementById('detail-close');
+  const detail          = document.getElementById('detail');
+  const detailTitle     = document.getElementById('detail-title');
+  const detailMeta      = document.getElementById('detail-meta');
+  const detailBody      = document.getElementById('detail-body');
+  const detailClose     = document.getElementById('detail-close');
+  const detailChartWrap = document.getElementById('detail-chart-wrap');
+  const detailCanvas    = document.getElementById('detail-chart');
+
+  let chartInstance = null;
+
+  const SERIES_COLORS = [
+    '#6c8ef5', '#4ade80', '#f59e0b', '#f87171',
+    '#a78bfa', '#38bdf8', '#fb923c', '#34d399',
+  ];
+
+  // Create tooltip DOM once
+  const tooltip = document.createElement('div');
+  tooltip.className = 'chart-tooltip';
+  detailChartWrap.appendChild(tooltip);
+
+  // Crosshair + glow plugin
+  const crosshairPlugin = {
+    id: 'crosshair',
+    afterDraw(chart) {
+      const x = chart._hoverX;
+      if (x == null) return;
+      const { top, bottom } = chart.chartArea;
+      const ctx = chart.ctx;
+      ctx.save();
+      // vertical line
+      ctx.beginPath();
+      ctx.moveTo(x, top);
+      ctx.lineTo(x, bottom);
+      ctx.setLineDash([3, 4]);
+      ctx.strokeStyle = 'rgba(108,142,245,0.35)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      // glow dots on each dataset at hover index
+      const idx = chart._hoverIdx;
+      if (idx == null) { ctx.restore(); return; }
+      chart.data.datasets.forEach((ds, di) => {
+        const val = ds.data[idx];
+        if (val == null) return;
+        const meta = chart.getDatasetMeta(di);
+        const pt   = meta.data[idx];
+        if (!pt) return;
+        const color = ds.borderColor;
+        // outer glow ring
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 9, 0, Math.PI * 2);
+        ctx.fillStyle = color + '22';
+        ctx.fill();
+        // middle ring
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 6, 0, Math.PI * 2);
+        ctx.fillStyle = color + '44';
+        ctx.fill();
+        // solid dot
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 8;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      });
+      ctx.restore();
+    },
+  };
+
+  function positionTooltip(chart, x) {
+    const wrap   = detailChartWrap;
+    const wWidth = wrap.clientWidth;
+    const ttW    = tooltip.offsetWidth || 160;
+    // keep tooltip inside the wrap
+    let left = x + 14;
+    if (left + ttW > wWidth - 12) left = x - ttW - 14;
+    tooltip.style.left = left + 'px';
+    tooltip.style.top  = (chart.chartArea.top + 4) + 'px';
+  }
+
+  function renderChart(allSeries) {
+    if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+    tooltip.classList.remove('visible');
+
+    // Flatten all timestamps to build a shared sorted x-axis
+    const tsSet = new Set();
+    allSeries.forEach(s => (s.points || []).forEach(p => tsSet.add(p.timestamp)));
+    if (tsSet.size === 0) { detailChartWrap.style.display = 'none'; return; }
+
+    const sortedTs = [...tsSet].sort((a, b) => a - b);
+    const labels   = sortedTs.map(ts => {
+      const d = new Date(ts / 1e6);
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    });
+
+    // full date+time for tooltip title
+    const labelsFull = sortedTs.map(ts => {
+      const d = new Date(ts / 1e6);
+      return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+    });
+
+    const datasets = allSeries.map((s, i) => {
+      const ptMap = new Map((s.points || []).map(p => [p.timestamp, p.value]));
+      const color = SERIES_COLORS[i % SERIES_COLORS.length];
+      return {
+        label: Object.entries(s.labels || {}).map(([k, v]) => `${k}=${v}`).join(', ') || 'value',
+        data:  sortedTs.map(ts => ptMap.has(ts) ? ptMap.get(ts) : null),
+        borderColor:     color,
+        backgroundColor: color + '18',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        pointHoverRadius: 0,   // handled by plugin
+        tension: 0.35,
+        fill: allSeries.length === 1,
+        spanGaps: false,
+      };
+    });
+
+    detailChartWrap.style.display = 'block';
+    chartInstance = new Chart(detailCanvas, {
+      type: 'line',
+      data: { labels, datasets },
+      plugins: [crosshairPlugin],
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        onHover(event, elements, chart) {
+          if (!elements.length) {
+            chart._hoverX = null;
+            chart._hoverIdx = null;
+            tooltip.classList.remove('visible');
+            chart.draw();
+            return;
+          }
+          const idx = elements[0].index;
+          const pt  = elements[0].element;
+          chart._hoverX   = pt.x;
+          chart._hoverIdx = idx;
+
+          // Build tooltip content
+          const rows = datasets.map((ds, di) => {
+            const val = ds.data[idx];
+            const color = ds.borderColor;
+            return `<div class="chart-tooltip-row">
+              <span class="chart-tooltip-dot" style="background:${color};box-shadow:0 0 5px ${color}88"></span>
+              <span class="chart-tooltip-name">${esc(ds.label)}</span>
+              <span class="chart-tooltip-val">${val != null ? val.toFixed(6) : '—'}</span>
+            </div>`;
+          }).join('');
+
+          tooltip.innerHTML = `<div class="chart-tooltip-time">${esc(labelsFull[idx])}</div>${rows}`;
+          tooltip.classList.add('visible');
+          positionTooltip(chart, pt.x);
+          chart.draw();
+        },
+        plugins: {
+          legend: {
+            display: allSeries.length > 1,
+            labels: { color: '#64748b', font: { size: 11 }, boxWidth: 8, padding: 12 },
+          },
+          tooltip: { enabled: false },
+        },
+        scales: {
+          x: {
+            ticks: { color: '#64748b', font: { size: 10 }, maxTicksLimit: 6, maxRotation: 0 },
+            grid: { color: '#2a2d3a' },
+            border: { color: '#2a2d3a' },
+          },
+          y: {
+            ticks: { color: '#64748b', font: { size: 10 } },
+            grid: { color: '#2a2d3a' },
+            border: { color: '#2a2d3a' },
+          },
+        },
+      },
+    });
+
+    detailCanvas.style.height = '130px';
+
+    detailCanvas.addEventListener('mouseleave', () => {
+      tooltip.classList.remove('visible');
+      chartInstance._hoverX   = null;
+      chartInstance._hoverIdx = null;
+      chartInstance.draw();
+    });
+  }
 
   function openDetail(metric, labels) {
     detailTitle.textContent = metric;
@@ -477,19 +822,26 @@
       : '<span style="color:var(--muted)">no labels</span>';
 
     detailBody.innerHTML = '<div class="detail-loading">Loading…</div>';
+    detailChartWrap.style.display = 'none';
     detail.classList.add('open');
 
+    const { fromNs, toNs } = getTimeRange();
     const qp = new URLSearchParams({ metric });
     for (const [k, v] of tags) qp.append('labels', `${k}=${v}`);
+    if (fromNs) qp.set('from', Math.round(fromNs).toString());
+    if (toNs)   qp.set('to',   Math.round(toNs).toString());
+
     fetch(`/api/query?${qp}`)
       .then(r => r.json())
       .then(data => {
         const series = data.series || [];
 
         if (series.length === 0) {
-          detailBody.innerHTML = '<div class="detail-loading">No data</div>';
+          detailBody.innerHTML = '<div class="detail-loading">No data in selected range</div>';
           return;
         }
+
+        renderChart(series);
 
         const showSeriesHeader = series.length > 1;
         detailBody.innerHTML = series.map(s => {
@@ -528,6 +880,8 @@
 
   function closeDetail() {
     detail.classList.remove('open');
+    tooltip.classList.remove('visible');
+    if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
   }
 
   detailClose.addEventListener('click', closeDetail);
